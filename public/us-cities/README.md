@@ -1,4 +1,5 @@
-City names per state, one JSON array per 2-letter state code. Used by the City dropdown.
+One JSON file per 2-letter state code: `{ "City name": ["ZIP", ...], ... }`.
+Used by the City dropdown and to fill in the ZIP code once a city is chosen.
 
-Source: US Cities Database by Kelvin S. do Prado (MIT License)
-https://github.com/kelvins/US-Cities-Database
+Source: GeoNames postal code data (US and PR), https://download.geonames.org/export/zip/
+Licensed under Creative Commons Attribution 4.0 (https://creativecommons.org/licenses/by/4.0/).

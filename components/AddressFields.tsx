@@ -20,17 +20,20 @@ export const emptyAddress = (): Address => ({
   country: "US",
 });
 
-// City lists live in public/us-cities/<STATE>.json and are fetched once per state.
-const cityCache = new Map<string, Promise<string[]>>();
+/** City name -> its ZIP codes, for one state. */
+type CityZips = Record<string, string[]>;
+
+// public/us-cities/<STATE>.json holds { city: [zips] } and is fetched once per state.
+const cityCache = new Map<string, Promise<CityZips>>();
 function loadCities(state: string) {
   if (!cityCache.has(state)) {
     cityCache.set(
       state,
       fetch(`/us-cities/${state}.json`)
-        .then((r) => (r.ok ? r.json() : []))
+        .then((r) => (r.ok ? r.json() : {}))
         .catch(() => {
           cityCache.delete(state); // allow a retry
-          return [];
+          return {};
         }),
     );
   }
@@ -38,20 +41,37 @@ function loadCities(state: string) {
 }
 
 function useCities(state: string) {
-  const [cities, setCities] = useState<{ state: string; list: string[] } | null>(null);
+  const [data, setData] = useState<{ state: string; zips: CityZips } | null>(null);
   useEffect(() => {
     if (!state) return;
     let live = true;
-    loadCities(state).then((list) => live && setCities({ state, list }));
+    loadCities(state).then((zips) => live && setData({ state, zips }));
     return () => {
       live = false;
     };
   }, [state]);
-  const ready = !!state && cities?.state === state;
-  return { cities: ready ? cities.list : [], loading: !!state && !ready };
+  const ready = !!state && data?.state === state;
+  const zips = ready ? data.zips : null;
+  const names = useMemo(() => (zips ? Object.keys(zips) : []), [zips]);
+  return { names, zips: zips ?? {}, loading: !!state && !ready };
 }
 
-const MAX_CITY_OPTIONS = 100;
+const MAX_OPTIONS = 100;
+
+/** Items starting with the text first, then items containing it. */
+function rank(list: string[], text: string, chosen: string) {
+  const q = text.trim().toLowerCase();
+  const matches =
+    !q || q === chosen.toLowerCase()
+      ? list.slice(0, MAX_OPTIONS)
+      : [
+          ...list.filter((c) => c.toLowerCase().startsWith(q)),
+          ...list.filter((c) => !c.toLowerCase().startsWith(q) && c.toLowerCase().includes(q)),
+        ].slice(0, MAX_OPTIONS);
+  // Keep the chosen value in the collection so the field can display it.
+  if (chosen && !matches.includes(chosen) && list.includes(chosen)) matches.unshift(chosen);
+  return matches.map((name) => ({ name }));
+}
 
 // Make the dropdowns read as search boxes: magnifier, typing hint, no dropdown arrow.
 const searchLook = {
@@ -60,41 +80,31 @@ const searchLook = {
   menuTrigger: "input" as const,
 };
 
-/** Pick-from-list city search: names starting with the text first, then names containing it. */
+/** Pick-from-list city search. */
 function CityAutocomplete({
   state,
+  names,
+  loading,
   value,
   onChange,
   disabled,
 }: {
   state: string;
+  names: string[];
+  loading: boolean;
   value: string;
   onChange: (city: string) => void;
   disabled?: boolean;
 }) {
-  const { cities, loading } = useCities(state);
   const [text, setText] = useState(value);
   useEffect(() => setText(value), [value]); // sample fill, swap
-
-  const items = useMemo(() => {
-    const q = text.trim().toLowerCase();
-    const matches =
-      !q || q === value.toLowerCase()
-        ? cities.slice(0, MAX_CITY_OPTIONS)
-        : [
-            ...cities.filter((c) => c.toLowerCase().startsWith(q)),
-            ...cities.filter((c) => !c.toLowerCase().startsWith(q) && c.toLowerCase().includes(q)),
-          ].slice(0, MAX_CITY_OPTIONS);
-    // Keep the chosen city in the collection so the field can display it.
-    if (value && !matches.includes(value) && cities.includes(value)) matches.unshift(value);
-    return matches.map((name) => ({ name }));
-  }, [cities, text, value]);
+  const items = useMemo(() => rank(names, text, value), [names, text, value]);
 
   return (
     <Autocomplete
+      {...searchLook}
       variant="bordered"
       size="sm"
-      {...searchLook}
       label="City"
       isRequired
       isDisabled={disabled || !state}
@@ -113,6 +123,52 @@ function CityAutocomplete({
   );
 }
 
+/** ZIP field: a list of the chosen city's ZIPs when it has several; typing any ZIP still works. */
+function ZipField({
+  options,
+  value,
+  onChange,
+  disabled,
+}: {
+  options: string[];
+  value: string;
+  onChange: (zip: string) => void;
+  disabled?: boolean;
+}) {
+  const common = {
+    variant: "bordered" as const,
+    size: "sm" as const,
+    label: "ZIP code",
+    isRequired: true,
+    isDisabled: disabled,
+    inputMode: "numeric" as const,
+    autoComplete: "postal-code",
+    maxLength: 10,
+  };
+  const clean = (v: string) => v.replace(/[^\d-]/g, "");
+  // Always filter by what's typed, so Enter picks the ZIP that matches rather than the first in the list.
+  const items = useMemo(() => rank(options, value, ""), [options, value]);
+
+  if (options.length < 2) {
+    return <Input {...common} value={value} onValueChange={(v) => onChange(clean(v))} />;
+  }
+  return (
+    <Autocomplete
+      {...common}
+      allowsCustomValue
+      menuTrigger="focus"
+      placeholder="Choose ZIP"
+      items={items}
+      inputValue={value}
+      onInputChange={(v) => onChange(clean(v))}
+      onSelectionChange={(key) => key && onChange(String(key))}
+      listboxProps={{ emptyContent: "Not a ZIP for this city, but you can still use it." }}
+    >
+      {(z) => <AutocompleteItem key={z.name}>{z.name}</AutocompleteItem>}
+    </Autocomplete>
+  );
+}
+
 const stateItems = US_STATES.map((s) => ({ ...s, label: `${s.code} – ${s.name}` }));
 
 type Props = {
@@ -126,10 +182,20 @@ type Props = {
 export function AddressFields({ value, onChange, disabled }: Props) {
   const set = (key: keyof Address) => (v: string) => onChange({ ...value, [key]: v });
   const common = { variant: "bordered" as const, size: "sm" as const, isDisabled: disabled };
+  const { names, zips, loading } = useCities(value.state);
+  const cityZips = (value.city && zips[value.city]) || [];
+
   function setState(code: string) {
     if (code === value.state) return;
-    // A city only makes sense within its state.
-    onChange({ ...value, state: code, city: "" });
+    // City and ZIP only make sense within their state.
+    onChange({ ...value, state: code, city: "", zip_code: "" });
+  }
+
+  function setCity(city: string) {
+    const options = zips[city] ?? [];
+    // One ZIP: fill it in. Several: keep the current ZIP if it belongs to the city, otherwise let the user pick.
+    const zip = options.length === 1 ? options[0] : options.includes(value.zip_code) ? value.zip_code : "";
+    onChange({ ...value, city, zip_code: zip });
   }
 
   return (
@@ -165,22 +231,21 @@ export function AddressFields({ value, onChange, disabled }: Props) {
         <CityAutocomplete
           key={value.state /* fresh search text when the state changes */}
           state={value.state}
+          names={names}
+          loading={loading}
           value={value.city}
-          onChange={set("city")}
+          onChange={setCity}
           disabled={disabled}
         />
       </div>
 
       <div className="grid grid-cols-2 gap-3">
-        <Input
-          {...common}
-          label="ZIP code"
-          isRequired
-          inputMode="numeric"
-          autoComplete="postal-code"
-          maxLength={10}
+        <ZipField
+          key={value.city /* switch between plain input and ZIP list cleanly */}
+          options={cityZips}
           value={value.zip_code}
-          onValueChange={(v) => set("zip_code")(v.replace(/[^\d-]/g, ""))}
+          onChange={set("zip_code")}
+          disabled={disabled}
         />
         <Input {...common} label="Phone" type="tel" isRequired autoComplete="tel" value={value.phone} onValueChange={set("phone")} />
       </div>
