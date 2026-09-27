@@ -1,0 +1,56 @@
+@import "tailwindcss";
+@plugin "./hero.ts";
+@source "../node_modules/@heroui/theme/dist/**/*.{js,ts,jsx,tsx}";
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --font-sans: var(--font-plex), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-archivo), ui-sans-serif, system-ui, sans-serif;
+  --color-ink: #10243e;
+  --color-steel: #5b6b7f;
+  --color-hivis: #ffb020;
+}
+
+body {
+  @apply bg-background text-foreground font-sans antialiased;
+}
+
+/* Wide freight-stencil headings */
+.display {
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 118;
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+}
+
+/* Barcode band used on the label preview */
+.barcode {
+  background: repeating-linear-gradient(
+    90deg,
+    var(--color-ink) 0 2px,
+    transparent 2px 4px,
+    var(--color-ink) 4px 7px,
+    transparent 7px 9px,
+    var(--color-ink) 9px 10px,
+    transparent 10px 13px
+  );
+}
+
+/* iPad/iPhone Safari zooms the page when a focused field's text is under 16px. */
+@media (pointer: coarse) {
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+}
+
+/* No grey flash when tapping buttons and links on iPad */
+html {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
