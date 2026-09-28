@@ -1,16 +1,27 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button, Input, addToast } from "@heroui/react";
 import { ShipmentsPanel } from "./ShipmentsPanel";
 import { applyMargin, formatMoney, round2 } from "@/lib/pricing";
 import type { MarginSettings, ShipmentRecord } from "@/lib/types";
 
-type Props = { initialSettings: MarginSettings; initialShipments: ShipmentRecord[] };
+type Props = { initialSettings: MarginSettings; initialShipments: ShipmentRecord[]; sessionEndsAt: number | null };
 
-export function AdminDashboard({ initialSettings, initialShipments }: Props) {
+export function AdminDashboard({ initialSettings, initialShipments, sessionEndsAt }: Props) {
   const router = useRouter();
+
+  // Times are shown in the viewer's time zone, so only render them in the browser.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+
+  // Sessions last 1 hour; leave the page when it runs out rather than failing on the next action.
+  useEffect(() => {
+    if (!sessionEndsAt) return;
+    const t = setTimeout(() => router.replace("/admin/login?next=/admin"), Math.max(sessionEndsAt - Date.now(), 0));
+    return () => clearTimeout(t);
+  }, [sessionEndsAt, router]);
   const [saved, setSaved] = useState(initialSettings);
   const [percent, setPercent] = useState(String(initialSettings.percent));
   const [flatFee, setFlatFee] = useState(String(initialSettings.flatFee));
@@ -35,6 +46,11 @@ export function AdminDashboard({ initialSettings, initialShipments }: Props) {
     });
     const json = await res.json().catch(() => ({}));
     setSaving(false);
+    if (res.status === 401) {
+      addToast({ title: "Session ended", description: "Sign in again to save.", color: "warning" });
+      router.replace("/admin/login?next=/admin");
+      return;
+    }
     if (!res.ok) {
       addToast({ title: "Margin not saved", description: json.error, color: "danger" });
       return;
@@ -58,9 +74,16 @@ export function AdminDashboard({ initialSettings, initialShipments }: Props) {
             Added on top of every ShipSaving rate. Customers only see the final price.
           </p>
         </div>
-        <Button variant="light" onPress={logout}>
-          Sign out
-        </Button>
+        <div className="flex items-center gap-3">
+          {mounted && sessionEndsAt && (
+            <span className="text-xs text-steel">
+              Session ends {new Date(sessionEndsAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+            </span>
+          )}
+          <Button variant="light" onPress={logout}>
+            Sign out
+          </Button>
+        </div>
       </div>
 
       <section className="grid items-start gap-10 md:grid-cols-[1fr_minmax(300px,380px)]">

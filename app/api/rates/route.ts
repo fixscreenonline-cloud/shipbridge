@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
+import { createHash } from "crypto";
 import { RateRequestSchema } from "@/lib/validation";
 import { getRates, type SSAddress } from "@/lib/shipsaving";
-import { getSettings, saveQuotes } from "@/lib/db";
+import { getSettings, saveDraftWithQuotes } from "@/lib/db";
 import { applyMargin, round2 } from "@/lib/pricing";
 import { errorResponse } from "@/lib/http";
-import type { Address, PublicRate, Quote } from "@/lib/types";
+import type { Address, Draft, PublicRate, Quote, ShipmentRequest } from "@/lib/types";
 
 export const runtime = "nodejs";
 
@@ -21,6 +22,17 @@ function toSSAddress(a: Address): SSAddress {
     zip: a.zip_code,
     country: a.country,
   };
+}
+
+/** Same addresses + parcel => same id, so re-quoting updates one draft instead of adding another. */
+function draftId(req: ShipmentRequest) {
+  const norm = (a: Address) =>
+    [a.first_name, a.last_name, a.company_name, a.phone, a.email, a.street, a.street2, a.city, a.state, a.zip_code, a.country]
+      .map((v) => (v ?? "").trim().toLowerCase().replace(/\s+/g, " "))
+      .join("|");
+  const p = req.package;
+  const key = [norm(req.from), norm(req.to), p.length, p.width, p.height, p.dimension_unit, p.weight, p.weight_unit].join("#");
+  return "d_" + createHash("sha256").update(key).digest("hex").slice(0, 24);
 }
 
 // "USPS_GROUND_ADVANTAGE" -> "USPS Ground Advantage"
@@ -65,11 +77,14 @@ export async function POST(req: Request) {
 
     const settings = await getSettings();
     const createdAt = new Date().toISOString();
+    const request: ShipmentRequest = { from, to, package: pkg, ...(shipDate ? { shipDate } : {}) };
+    const id = draftId(request);
 
     const quotes: Quote[] = ssRates
       .filter((r) => typeof r.rate === "number" && r.rate > 0 && r.rate_id)
       .map((r) => ({
         rateId: r.rate_id,
+        draftId: id,
         carrierCode: r.carrier,
         serviceName: serviceLabel(r.service || r.service_type),
         serviceLevel: r.service_type,
@@ -84,7 +99,16 @@ export async function POST(req: Request) {
         usedAt: null,
       }));
 
-    await saveQuotes(quotes);
+    const draft: Draft = {
+      ...request,
+      id,
+      createdAt,
+      updatedAt: createdAt,
+      rateCount: quotes.length,
+      lowestPrice: quotes.length ? Math.min(...quotes.map((q) => q.price)) : null,
+      currency: "USD",
+    };
+    await saveDraftWithQuotes(draft, quotes);
 
     // Strip cost/margin before sending to the browser.
     const rates: PublicRate[] = quotes

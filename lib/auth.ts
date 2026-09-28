@@ -1,6 +1,7 @@
 // Works in both the Edge runtime (middleware) and Node (route handlers).
 export const SESSION_COOKIE = "sb_admin";
-export const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+/** Admin sessions end 1 hour after sign-in. */
+export const SESSION_TTL_MS = 60 * 60 * 1000;
 
 const enc = new TextEncoder();
 
@@ -37,6 +38,8 @@ export async function verifySessionToken(token: string | undefined) {
   if (parts.length !== 3) return false;
   const [role, exp, sig] = parts;
   if (role !== "admin" || !(Number(exp) > Date.now())) return false;
+  // Also reject tokens issued with a longer lifetime than today's limit.
+  if (Number(exp) - Date.now() > SESSION_TTL_MS) return false;
   try {
     return safeEqual(sig, await sign(`${role}.${exp}`));
   } catch {

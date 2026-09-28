@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { BuyRequestSchema } from "@/lib/validation";
 import { buyLabel, type SSLabel } from "@/lib/shipsaving";
-import { addShipment, claimQuote, releaseQuote } from "@/lib/db";
+import { addShipment, claimQuote, getDraft, releaseQuote } from "@/lib/db";
 import { round2 } from "@/lib/pricing";
 import { errorResponse } from "@/lib/http";
 import type { Quote, ShipmentDetails, ShipmentParty } from "@/lib/types";
@@ -66,6 +66,8 @@ export async function POST(req: Request) {
 
   try {
     const label = await buyLabel(rateId);
+    // Keep the form inputs with the booking so it can be re-quoted after the draft is gone.
+    const draft = quote.draftId ? await getDraft(quote.draftId).catch(() => null) : null;
 
     // What ShipSaving actually charged: label rate + service fee + insurance, falling back to the quote.
     const cost =
@@ -88,6 +90,7 @@ export async function POST(req: Request) {
       currency: quote.currency,
       labelUrls: label.label_url ?? [],
       details: details(label, quote),
+      ...(draft ? { request: { from: draft.from, to: draft.to, package: draft.package, shipDate: draft.shipDate } } : {}),
     };
     await addShipment(record);
 

@@ -45,6 +45,8 @@ export type PublicRate = {
 
 /** Server-side record of a quoted rate: what it costs you and what you charge. */
 export type Quote = PublicRate & {
+  /** The draft (form inputs) this quote was fetched for. */
+  draftId?: string;
   cost: number;
   recipient: string;
   marginPercent: number;
@@ -70,6 +72,8 @@ export type ShipmentRecord = {
   labelUrls: string[];
   /** Full booking details from ShipSaving's purchase response. Missing on older records. */
   details?: ShipmentDetails;
+  /** The form inputs used to quote this label, so it can be re-quoted. Missing on older records. */
+  request?: ShipmentRequest;
 };
 
 export type ShipmentParty = {
@@ -102,4 +106,25 @@ export type ShipmentDetails = {
   quotedCost: number;
   flatFee: number;
   labelStatus: string | null;
+};
+
+/** What the shipment form sends to get rates. */
+export type ShipmentRequest = {
+  from: Address;
+  to: Address;
+  package: PackageInput;
+  shipDate?: string;
+};
+
+/**
+ * A price check, kept for 24 hours after it was last quoted so it can be reused.
+ * Re-quoting the same addresses and parcel updates the same draft (the id is a hash of them).
+ */
+export type Draft = ShipmentRequest & {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  rateCount: number;
+  lowestPrice: number | null;
+  currency: string;
 };

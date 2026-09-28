@@ -67,8 +67,14 @@ Open http://localhost:3000 for shipments and http://localhost:3000/admin for the
 `lib/db.ts` stores settings, quotes and shipments in one of two places:
 
 - **MongoDB** when `MONGODB_URI` is set. Use this on Vercel or any serverless host, where the
-  filesystem is read-only. Collections: `settings`, `quotes` (auto-deleted 24 h after creation by a
-  TTL index), `shipments`. Indexes are created on first connect.
+  filesystem is read-only. Collections: `settings`, `drafts` and `quotes` (both auto-deleted 24 h
+  after they were last quoted, by TTL indexes), `shipments`, `login_attempts`. Indexes are created
+  on first connect.
+
+**Drafts:** every price check saves its form inputs as a draft, keyed by a hash of the addresses and
+parcel, so quoting the same shipment again updates one draft and replaces its unbought quotes
+instead of piling up duplicates. Signed-in admins see drafts and recent bookings in a **Recent**
+panel on the shipment page and can refill the form from them.
 - **`data/shipbridge.json`** otherwise. Fine for local development or a single VPS.
 
 ### MongoDB on Vercel

@@ -4,9 +4,10 @@ import { useRef, useState } from "react";
 import NextLink from "next/link";
 import { Alert, Button, Chip, Input, Skeleton, Tab, Tabs, addToast } from "@heroui/react";
 import { AddressFields, emptyAddress } from "./AddressFields";
+import { RecentPanel } from "./RecentPanel";
 import { ArrowRightIcon, BoxIcon, CheckIcon, ClockIcon, SwapIcon, TruckIcon } from "./icons";
 import { formatMoney } from "@/lib/pricing";
-import type { Address, DimensionUnit, PublicRate, WeightUnit } from "@/lib/types";
+import type { Address, DimensionUnit, PublicRate, ShipmentRequest, WeightUnit } from "@/lib/types";
 
 type Pkg = { length: string; width: string; height: string; dimension_unit: DimensionUnit; weight: string; weight_unit: WeightUnit };
 type Purchased = {
@@ -112,6 +113,9 @@ export function ShipmentForm() {
   const [needsLogin, setNeedsLogin] = useState(false);
   const [purchased, setPurchased] = useState<Purchased | null>(null);
   const ratesRef = useRef<HTMLElement>(null);
+  const formTopRef = useRef<HTMLDivElement>(null);
+  // Bumped after rates or a purchase so the Recent panel reloads.
+  const [recentKey, setRecentKey] = useState(0);
 
   // Any edit invalidates the current rates.
   const touch = <T,>(setter: (v: T) => void) => (v: T) => {
@@ -157,6 +161,7 @@ export function ShipmentForm() {
       setRates(json.rates);
       setCarrierErrors(json.carrierErrors ?? []);
       if (json.rates.length) setSelected(json.rates[0].rateId);
+      setRecentKey((k) => k + 1);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -181,6 +186,7 @@ export function ShipmentForm() {
       }
       if (!res.ok) throw new Error(json.error ?? "Could not buy the label.");
       setPurchased(json.shipment);
+      setRecentKey((k) => k + 1);
       addToast({ title: "Label bought", description: `Shipment ${json.shipment.shipmentNo}`, color: "success" });
     } catch (err) {
       setError((err as Error).message);
@@ -196,6 +202,28 @@ export function ShipmentForm() {
     setRates(null);
     setSelected(null);
     setError(null);
+  }
+
+  /** Refill the form from a draft or past booking; prices are fetched fresh with Get rates. */
+  function fillFromRequest(req: ShipmentRequest, what: string) {
+    setFrom({ ...emptyAddress(), ...req.from });
+    setTo({ ...emptyAddress(), ...req.to });
+    const p = req.package;
+    setPkg({
+      length: String(p.length),
+      width: String(p.width),
+      height: String(p.height),
+      dimension_unit: p.dimension_unit,
+      weight: String(p.weight),
+      weight_unit: p.weight_unit,
+    });
+    // An old ship date is likely in the past; keep it only if it's still ahead.
+    setShipDate(req.shipDate && req.shipDate >= new Date().toISOString().slice(0, 10) ? req.shipDate : "");
+    setRates(null);
+    setSelected(null);
+    setError(null);
+    formTopRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    addToast({ title: `Filled from ${what}`, description: "Check the details, then choose Get rates.", color: "primary" });
   }
 
   function swap() {
@@ -270,7 +298,9 @@ export function ShipmentForm() {
           )}
         </div>
 
-        <div className="@container">
+        <RecentPanel refreshKey={recentKey} onUse={fillFromRequest} />
+
+        <div ref={formTopRef} className="@container scroll-mt-4">
           <div className="grid gap-6 @2xl:grid-cols-2">
             <Section step={1} title="Ship from">
               <AddressFields value={from} onChange={touch(setFrom)} disabled={loadingRates} />
