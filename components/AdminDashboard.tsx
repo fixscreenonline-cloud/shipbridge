@@ -1,19 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
-import {
-  Button,
-  Input,
-  Link,
-  Table,
-  TableBody,
-  TableCell,
-  TableColumn,
-  TableHeader,
-  TableRow,
-  addToast,
-} from "@heroui/react";
+import { Button, Input, addToast } from "@heroui/react";
+import { ShipmentsPanel } from "./ShipmentsPanel";
 import { applyMargin, formatMoney, round2 } from "@/lib/pricing";
 import type { MarginSettings, ShipmentRecord } from "@/lib/types";
 
@@ -35,15 +25,6 @@ export function AdminDashboard({ initialSettings, initialShipments }: Props) {
   const cost = Math.max(Number(sampleCost) || 0, 0);
   const customerPays = valid ? applyMargin(cost, { percent: pct, flatFee: fee }) : cost;
   const youKeep = round2(customerPays - cost);
-
-  const totals = useMemo(
-    () =>
-      initialShipments.reduce(
-        (t, s) => ({ cost: t.cost + s.cost, charged: t.charged + s.charged, profit: t.profit + s.profit }),
-        { cost: 0, charged: 0, profit: 0 },
-      ),
-    [initialShipments],
-  );
 
   async function save() {
     setSaving(true);
@@ -162,55 +143,7 @@ export function AdminDashboard({ initialSettings, initialShipments }: Props) {
         </figure>
       </section>
 
-      <section className="space-y-5">
-        <div className="flex flex-wrap items-baseline justify-between gap-4">
-          <h2 className="display text-2xl font-bold">Shipments</h2>
-          <p className="text-sm text-steel">
-            {initialShipments.length} labels. Cost {formatMoney(totals.cost)}, charged {formatMoney(totals.charged)},{" "}
-            <strong className="text-success">profit {formatMoney(totals.profit)}</strong>
-          </p>
-        </div>
-
-        {/* Scrolls sideways on narrow screens (phones, iPad portrait) instead of squashing columns */}
-        <div className="overflow-x-auto rounded-md border-2 border-ink/10 bg-content1 [-webkit-overflow-scrolling:touch]">
-          <Table aria-label="Shipments" removeWrapper className="min-w-[760px]">
-            <TableHeader>
-              <TableColumn>Date</TableColumn>
-              <TableColumn>Recipient</TableColumn>
-              <TableColumn>Service</TableColumn>
-              <TableColumn>Tracking</TableColumn>
-              <TableColumn align="end">Cost</TableColumn>
-              <TableColumn align="end">Charged</TableColumn>
-              <TableColumn align="end">Profit</TableColumn>
-              <TableColumn>Label</TableColumn>
-            </TableHeader>
-            <TableBody emptyContent="No labels yet. Bought labels will appear here with their profit.">
-              {initialShipments.map((s) => (
-                <TableRow key={s.id}>
-                  <TableCell className="whitespace-nowrap">{new Date(s.createdAt).toLocaleDateString()}</TableCell>
-                  <TableCell>{s.recipient}</TableCell>
-                  <TableCell>{s.serviceName}</TableCell>
-                  <TableCell>{s.trackingNo ?? s.shipmentNo}</TableCell>
-                  <TableCell className="tabular-nums">{formatMoney(s.cost, s.currency)}</TableCell>
-                  <TableCell className="tabular-nums">{formatMoney(s.charged, s.currency)}</TableCell>
-                  <TableCell className={`tabular-nums font-medium ${s.profit < 0 ? "text-danger" : "text-success"}`}>
-                    {formatMoney(s.profit, s.currency)}
-                  </TableCell>
-                  <TableCell>
-                    {s.labelUrls[0] ? (
-                      <Link href={s.labelUrls[0]} isExternal size="sm">
-                        Open
-                      </Link>
-                    ) : (
-                      "None"
-                    )}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
-      </section>
+      <ShipmentsPanel shipments={initialShipments} />
     </div>
   );
 }

@@ -57,11 +57,35 @@ export type SSLabel = {
   label_status: string;
   carrier: string;
   service: string;
+  delivery_days?: string | number | null;
   rate: number | null;
+  published_rate?: number | null;
   service_fee: number | null;
   insurance_fee: number | null;
   label_url: string[] | null;
   commercial_invoice_url: string | null;
+  length?: number | null;
+  width?: number | null;
+  height?: number | null;
+  weight?: number | null;
+  from_name?: string | null;
+  from_company?: string | null;
+  from_phone?: string | null;
+  from_street?: string | null;
+  from_street2?: string | null;
+  from_city?: string | null;
+  from_state?: string | null;
+  from_zip?: string | null;
+  from_country?: string | null;
+  to_name?: string | null;
+  to_company?: string | null;
+  to_phone?: string | null;
+  to_street?: string | null;
+  to_street2?: string | null;
+  to_city?: string | null;
+  to_state?: string | null;
+  to_zip?: string | null;
+  to_country?: string | null;
 };
 
 // ---------- Generic call ----------

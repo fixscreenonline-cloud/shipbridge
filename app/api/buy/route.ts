@@ -1,11 +1,55 @@
 import { NextResponse } from "next/server";
 import { BuyRequestSchema } from "@/lib/validation";
-import { buyLabel } from "@/lib/shipsaving";
+import { buyLabel, type SSLabel } from "@/lib/shipsaving";
 import { addShipment, claimQuote, releaseQuote } from "@/lib/db";
 import { round2 } from "@/lib/pricing";
 import { errorResponse } from "@/lib/http";
+import type { Quote, ShipmentDetails, ShipmentParty } from "@/lib/types";
 
 export const runtime = "nodejs";
+
+const str = (v: unknown) => (v == null ? "" : String(v));
+const num = (v: unknown) => {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+
+function party(label: SSLabel, side: "from" | "to"): ShipmentParty | null {
+  const get = (f: string) => str((label as Record<string, unknown>)[`${side}_${f}`]);
+  if (!get("name") && !get("street")) return null;
+  return {
+    name: get("name"),
+    company: get("company"),
+    phone: get("phone"),
+    street: get("street"),
+    street2: get("street2"),
+    city: get("city"),
+    state: get("state"),
+    zip: get("zip"),
+    country: get("country") || "US",
+  };
+}
+
+/** Everything worth keeping about the booking, taken from ShipSaving's purchase response. */
+function details(label: SSLabel, quote: Quote): ShipmentDetails {
+  const l = num(label.length), w = num(label.width), h = num(label.height), wt = num(label.weight);
+  return {
+    from: party(label, "from"),
+    to: party(label, "to"),
+    parcel: l && w && h && wt ? { length: l, width: w, height: h, weight: wt } : null,
+    carrier: quote.carrierCode || str(label.carrier), // same source as the service name
+    service: quote.serviceName,
+    deliveryDays: str(label.delivery_days) || quote.deliveryDays,
+    labelRate: num(label.rate),
+    serviceFee: num(label.service_fee) ?? 0,
+    insuranceFee: num(label.insurance_fee) ?? 0,
+    publishedRate: num(label.published_rate),
+    quotedCost: quote.cost,
+    flatFee: quote.flatFee,
+    labelStatus: str(label.label_status) || null,
+  };
+}
 
 export async function POST(req: Request) {
   const parsed = BuyRequestSchema.safeParse(await req.json().catch(() => null));
@@ -43,6 +87,7 @@ export async function POST(req: Request) {
       marginPercent: quote.marginPercent,
       currency: quote.currency,
       labelUrls: label.label_url ?? [],
+      details: details(label, quote),
     };
     await addShipment(record);
 

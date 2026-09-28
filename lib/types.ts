@@ -68,4 +68,38 @@ export type ShipmentRecord = {
   marginPercent: number;
   currency: string;
   labelUrls: string[];
+  /** Full booking details from ShipSaving's purchase response. Missing on older records. */
+  details?: ShipmentDetails;
+};
+
+export type ShipmentParty = {
+  name: string;
+  company: string;
+  phone: string;
+  street: string;
+  street2: string;
+  city: string;
+  state: string;
+  zip: string;
+  country: string;
+};
+
+export type ShipmentDetails = {
+  from: ShipmentParty | null;
+  to: ShipmentParty | null;
+  /** Inches and pounds. */
+  parcel: { length: number; width: number; height: number; weight: number } | null;
+  carrier: string;
+  service: string;
+  deliveryDays: string | null;
+  /** Cost breakdown as charged by ShipSaving. */
+  labelRate: number | null;
+  serviceFee: number;
+  insuranceFee: number;
+  /** Carrier's list price before ShipSaving's discount. */
+  publishedRate: number | null;
+  /** What the quote said the label would cost, before fees. */
+  quotedCost: number;
+  flatFee: number;
+  labelStatus: string | null;
 };

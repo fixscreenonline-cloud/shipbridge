@@ -43,7 +43,9 @@ Open http://localhost:3000 for shipments and http://localhost:3000/admin for the
 | `ADMIN_PASSWORD` | Admin sign-in password. |
 | `ADMIN_SESSION_SECRET` | Random 32+ char string (`openssl rand -hex 32`). Signs the session cookie. |
 | `DEFAULT_MARGIN_PERCENT`, `DEFAULT_FLAT_FEE` | Used until you save a margin in /admin. |
-| `DATA_DIR` | Folder for the JSON data file. |
+| `MONGODB_URI` | MongoDB connection string. **Required on Vercel.** Leave empty locally to use the JSON file. |
+| `MONGODB_DB` | Database name (default `shipbridge`). |
+| `DATA_DIR` | Folder for the JSON data file (only used when `MONGODB_URI` is empty). |
 
 ## Who can do what
 
@@ -62,9 +64,21 @@ Open http://localhost:3000 for shipments and http://localhost:3000/admin for the
 
 ## Storage
 
-`lib/db.ts` stores settings, quotes and shipments in `data/shipbridge.json`. That's fine locally or
-on a single VPS. **Serverless hosts like Vercel don't keep files**, so swap those functions for a
-database (Postgres/Supabase, Redis, etc.) before deploying there. The function names stay the same.
+`lib/db.ts` stores settings, quotes and shipments in one of two places:
+
+- **MongoDB** when `MONGODB_URI` is set. Use this on Vercel or any serverless host, where the
+  filesystem is read-only. Collections: `settings`, `quotes` (auto-deleted 24 h after creation by a
+  TTL index), `shipments`. Indexes are created on first connect.
+- **`data/shipbridge.json`** otherwise. Fine for local development or a single VPS.
+
+### MongoDB on Vercel
+
+1. Create a free cluster at https://cloud.mongodb.com (or add **MongoDB Atlas** from the Vercel
+   Marketplace, which sets `MONGODB_URI` for you).
+2. In Atlas → **Network Access**, allow `0.0.0.0/0`. Vercel functions don't have fixed IPs.
+3. In Atlas → **Database Access**, create a user; put its connection string in Vercel →
+   Project → Settings → Environment Variables as `MONGODB_URI`.
+4. Redeploy.
 
 ## Notes and limits
 
@@ -90,7 +104,7 @@ app/
 components/                HeroUI client components
 lib/shipsaving.ts          ShipSaving v1 client (API token + endpoints)
 lib/pricing.ts             Margin math
-lib/db.ts                  JSON file storage (swap for a DB in production)
+lib/db.ts                  Storage: MongoDB (MONGODB_URI) or local JSON file
 lib/auth.ts                Signed admin session cookie
 middleware.ts              Route protection
 ```
