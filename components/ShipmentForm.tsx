@@ -59,6 +59,16 @@ const sampleTo: Address = {
 };
 const samplePkg: Pkg = { length: "10", width: "8", height: "4", dimension_unit: "in", weight: "2", weight_unit: "lb" };
 
+/** Saved addresses can hold null/undefined for empty optional fields; the form needs strings. */
+function toFormAddress(a: Partial<Record<keyof Address, unknown>>): Address {
+  const base = emptyAddress();
+  for (const key of Object.keys(base) as (keyof Address)[]) {
+    const v = a[key];
+    base[key] = v == null ? (key === "country" ? "US" : "") : String(v);
+  }
+  return base;
+}
+
 // Carrier accent colors for the rate list.
 const CARRIER_STYLE: Record<string, string> = {
   USPS: "bg-[#004B87] text-white",
@@ -206,8 +216,8 @@ export function ShipmentForm() {
 
   /** Refill the form from a draft or past booking; prices are fetched fresh with Get rates. */
   function fillFromRequest(req: ShipmentRequest, what: string) {
-    setFrom({ ...emptyAddress(), ...req.from });
-    setTo({ ...emptyAddress(), ...req.to });
+    setFrom(toFormAddress(req.from));
+    setTo(toFormAddress(req.to));
     const p = req.package;
     setPkg({
       length: String(p.length),

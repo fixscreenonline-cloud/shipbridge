@@ -1,10 +1,11 @@
 import { z } from "zod";
 import { US_STATE_CODES } from "./us-states";
 
+// Optional text: "", null and missing all mean "not given" (saved drafts can hold nulls).
 const optionalText = z
   .string()
   .trim()
-  .optional()
+  .nullish()
   .transform((v) => (v ? v : undefined));
 
 const required = (label: string) => z.string().trim().min(1, `${label} is required`);
@@ -40,11 +41,13 @@ export const RateRequestSchema = z.object({
   from: AddressSchema,
   to: AddressSchema,
   package: PackageSchema,
+  // "", null and missing all mean "no ship date".
   shipDate: z
     .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/)
-    .optional()
-    .or(z.literal("").transform(() => undefined)),
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "Use a date like 2026-10-05")
+    .nullish()
+    .or(z.literal(""))
+    .transform((v) => v || undefined),
 });
 
 export const BuyRequestSchema = z.object({

@@ -355,7 +355,7 @@ const g = globalThis as unknown as { __sbMongo?: Promise<Db> };
 function connect(): Promise<Db> {
   if (!g.__sbMongo) {
     g.__sbMongo = (async () => {
-      const client = await new MongoClient(MONGODB_URI!, { maxPoolSize: 5 }).connect();
+      const client = await new MongoClient(MONGODB_URI!, { maxPoolSize: 5, ignoreUndefined: true /* skip empty optional fields instead of storing null */ }).connect();
       const db = client.db(MONGODB_DB);
       await Promise.all([
         db.collection("quotes").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),

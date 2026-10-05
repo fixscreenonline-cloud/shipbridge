@@ -109,7 +109,11 @@ async function call<T>(method: "GET" | "POST", path: string, opts: { query?: Rec
 
   // Errors come back as { "message": "..." }.
   const message: string | undefined = json?.message ?? json?.msg ?? json?.error;
-  if (res.status === 401) throw new ShipSavingError("ShipSaving rejected the API token. Check SHIPSAVING_API_TOKEN.", 502, json);
+  if (res.status === 401) {
+    // Pass on ShipSaving's reason (e.g. "Account not valid…") instead of always blaming the token.
+    const reason = message && message !== "Authentication failed" ? message : "Check SHIPSAVING_API_TOKEN.";
+    throw new ShipSavingError(`ShipSaving rejected the API token: ${reason}`, 502, json);
+  }
   if (res.status === 429) throw new ShipSavingError("ShipSaving is rate-limiting requests. Wait a moment and try again.", 429, json);
   throw new ShipSavingError(message || `ShipSaving request failed (HTTP ${res.status}).`, res.status < 500 ? 400 : 502, json);
 }
