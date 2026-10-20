@@ -6,12 +6,13 @@ import { Alert, Button, Chip, Input, Skeleton, Tab, Tabs, addToast } from "@hero
 import { AddressFields, emptyAddress } from "./AddressFields";
 import { RecentPanel } from "./RecentPanel";
 import { AddressAssist } from "./AddressAssist";
-import { ArrowRightIcon, BoxIcon, CheckIcon, ClockIcon, SwapIcon, TruckIcon } from "./icons";
+import { ArrowRightIcon, BoxIcon, CheckIcon, ClockIcon, PrinterIcon, SwapIcon, TruckIcon } from "./icons";
 import { formatMoney } from "@/lib/pricing";
 import type { Address, DimensionUnit, PublicRate, ShipmentRequest, WeightUnit } from "@/lib/types";
 
 type Pkg = { length: string; width: string; height: string; dimension_unit: DimensionUnit; weight: string; weight_unit: WeightUnit };
 type Purchased = {
+  id: string;
   shipmentNo: string;
   trackingNo: string | null;
   labelUrls: string[];
@@ -295,6 +296,43 @@ export function ShipmentForm({
     setTo(f);
   }
 
+  // Print the label from this page (desktop browsers). The label is served from our own site so the
+  // browser allows printing it; iPhone/iPad can't print a PDF from a page, so open it there instead.
+  const [printing, setPrinting] = useState(false);
+  function printLabel(id: string) {
+    const src = `/api/label/${encodeURIComponent(id)}`;
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    if (isIOS) {
+      window.open(src, "_blank", "noopener");
+      return;
+    }
+    setPrinting(true);
+    document.getElementById("label-print-frame")?.remove();
+    const frame = document.createElement("iframe");
+    frame.id = "label-print-frame";
+    frame.title = "Label for printing";
+    frame.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden";
+    const fallback = () => {
+      setPrinting(false);
+      window.open(src, "_blank", "noopener");
+    };
+    frame.onload = () => {
+      setPrinting(false);
+      // Give the PDF viewer a moment to load before opening the print dialog.
+      setTimeout(() => {
+        try {
+          frame.contentWindow?.focus();
+          frame.contentWindow?.print();
+        } catch {
+          fallback();
+        }
+      }, 400);
+    };
+    frame.onerror = fallback;
+    frame.src = src;
+    document.body.appendChild(frame);
+  }
+
   function reset() {
     setTo(emptyAddress());
     setPkg(emptyPkg);
@@ -323,8 +361,20 @@ export function ShipmentForm({
             <dd className="font-mono font-medium">{purchased.trackingNo ?? "Not provided yet"}</dd>
           </dl>
           <div className="mt-8 flex flex-wrap gap-3">
+            {purchased.labelUrls.length > 0 && (
+              <Button
+                color="secondary"
+                size="lg"
+                className="font-semibold"
+                startContent={!printing && <PrinterIcon />}
+                isLoading={printing}
+                onPress={() => printLabel(purchased.id)}
+              >
+                {printing ? "Preparing…" : "Print label"}
+              </Button>
+            )}
             {purchased.labelUrls.map((url, i) => (
-              <Button key={url} as="a" href={url} target="_blank" rel="noopener" color="secondary" size="lg" className="font-semibold">
+              <Button key={url} as="a" href={url} target="_blank" rel="noopener" variant="bordered" size="lg" className="font-semibold">
                 {purchased.labelUrls.length > 1 ? `Open label ${i + 1}` : "Open label"}
               </Button>
             ))}

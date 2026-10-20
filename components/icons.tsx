@@ -114,3 +114,10 @@ export const ShieldIcon = ({ className = "size-4" }: P) => (
     <path d="m9 12 2 2 4-4" />
   </svg>
 );
+
+export const PrinterIcon = ({ className = "size-5" }: P) => (
+  <svg viewBox="0 0 24 24" className={className} {...base}>
+    <path d="M6 9V3h12v6M6 18H4a1 1 0 0 1-1-1v-6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v6a1 1 0 0 1-1 1h-2" />
+    <path d="M6 14h12v7H6z" />
+  </svg>
+);

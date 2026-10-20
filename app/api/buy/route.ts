@@ -97,6 +97,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       shipment: {
+        id: record.id,
         shipmentNo: record.shipmentNo,
         trackingNo: record.trackingNo,
         labelUrls: record.labelUrls,

@@ -23,7 +23,19 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   async headers() {
     return [
-      { source: "/:path*", headers: securityHeaders },
+      // Everything except the label file may never be shown inside a frame.
+      { source: "/((?!api/label/).*)", headers: securityHeaders },
+      // The label file is printed from a hidden frame on our own page, so allow same-site framing only.
+      {
+        source: "/api/label/:path*",
+        headers: securityHeaders.map((h) =>
+          h.key === "X-Frame-Options"
+            ? { key: "X-Frame-Options", value: "SAMEORIGIN" }
+            : h.key === "Content-Security-Policy"
+              ? { key: "Content-Security-Policy", value: "frame-ancestors 'self'; object-src 'self'" }
+              : h,
+        ),
+      },
       // Admin pages and APIs never go into shared caches.
       { source: "/admin/:path*", headers: [{ key: "Cache-Control", value: "no-store" }] },
       { source: "/api/:path*", headers: [{ key: "Cache-Control", value: "no-store" }] },
