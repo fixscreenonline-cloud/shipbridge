@@ -1,10 +1,16 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Autocomplete, AutocompleteItem, Input } from "@heroui/react";
 import { US_STATES } from "@/lib/us-states";
 import type { Address } from "@/lib/types";
-import { SearchIcon } from "./icons";
+import { CheckIcon, SearchIcon } from "./icons";
+
+const SparkIcon = () => (
+  <svg viewBox="0 0 24 24" className="size-3.5 shrink-0 text-hivis" fill="currentColor" aria-hidden>
+    <path d="M12 2l1.8 5.5L19 9l-5.2 1.6L12 16l-1.8-5.4L5 9l5.2-1.5z" />
+  </svg>
+);
 
 export const emptyAddress = (): Address => ({
   first_name: "",
@@ -150,7 +156,7 @@ function ZipField({
   const items = useMemo(() => rank(options, value, ""), [options, value]);
 
   if (options.length < 2) {
-    return <Input {...common} value={value} onValueChange={(v) => onChange(clean(v))} />;
+    return <Input {...common} placeholder="Fills city & state" value={value} onValueChange={(v) => onChange(clean(v))} />;
   }
   return (
     <Autocomplete
@@ -169,6 +175,24 @@ function ZipField({
   );
 }
 
+// public/us-zips/<first 3 digits>.json holds { zip: [state, city] }, fetched once per prefix.
+const zipCache = new Map<string, Promise<Record<string, [string, string]>>>();
+function lookupZip(zip: string) {
+  const prefix = zip.slice(0, 3);
+  if (!zipCache.has(prefix)) {
+    zipCache.set(
+      prefix,
+      fetch(`/us-zips/${prefix}.json`)
+        .then((r) => (r.ok ? r.json() : {}))
+        .catch(() => {
+          zipCache.delete(prefix);
+          return {};
+        }),
+    );
+  }
+  return zipCache.get(prefix)!.then((m) => m[zip.slice(0, 5)] ?? null);
+}
+
 const stateItems = US_STATES.map((s) => ({ ...s, label: `${s.code} – ${s.name}` }));
 
 type Props = {
@@ -185,13 +209,33 @@ export function AddressFields({ value, onChange, disabled }: Props) {
   const { names, zips, loading } = useCities(value.state);
   const cityZips = (value.city && zips[value.city]) || [];
 
+  // Latest value for async updates (the ZIP lookup finishes after a render or two).
+  const latest = useRef(value);
+  // Which ZIP last filled state + city (for the note under the tip); cleared when they're changed by hand.
+  const [filledFrom, setFilledFrom] = useState<string | null>(null);
+  latest.current = value;
+
+  /** ZIP first: a full 5-digit ZIP fills state and city when either is still empty. */
+  function setZip(zip: string) {
+    onChange({ ...value, zip_code: zip });
+    if (!/^\d{5}/.test(zip) || (value.state && value.city)) return;
+    lookupZip(zip).then((hit) => {
+      const cur = latest.current;
+      if (!hit || cur.zip_code !== zip || (cur.state && cur.city)) return;
+      onChange({ ...cur, state: hit[0], city: hit[1] });
+      setFilledFrom(zip.slice(0, 5));
+    });
+  }
+
   function setState(code: string) {
     if (code === value.state) return;
-    // City and ZIP only make sense within their state.
-    onChange({ ...value, state: code, city: "", zip_code: "" });
+    setFilledFrom(null);
+    // A city only makes sense within its state; keep the ZIP (it may be what set the state).
+    onChange({ ...value, state: code, city: "" });
   }
 
   function setCity(city: string) {
+    setFilledFrom(null);
     const options = zips[city] ?? [];
     // One ZIP: fill it in. Several: keep the current ZIP if it belongs to the city, otherwise let the user pick.
     const zip = options.length === 1 ? options[0] : options.includes(value.zip_code) ? value.zip_code : "";
@@ -208,13 +252,32 @@ export function AddressFields({ value, onChange, disabled }: Props) {
       <Input {...common} label="Street address" isRequired autoComplete="address-line1" value={value.street} onValueChange={set("street")} />
       <Input {...common} label="Apt, suite, unit (optional)" autoComplete="address-line2" value={value.street2} onValueChange={set("street2")} />
 
-      <div className="grid grid-cols-1 gap-3 @md:grid-cols-2">
+      {/* Tell people the ZIP fills the rest, and confirm when it did. */}
+      {filledFrom && value.zip_code.startsWith(filledFrom) && value.state && value.city ? (
+        <p className="flex items-center gap-1.5 text-xs text-success-700" aria-live="polite">
+          <CheckIcon className="size-3.5" /> State and city filled from ZIP {filledFrom}. Change them if needed.
+        </p>
+      ) : (
+        !(value.state && value.city) && (
+          <p className="flex items-center gap-1.5 text-xs text-steel">
+            <SparkIcon /> Enter the ZIP code and we&apos;ll fill in the state and city for you.
+          </p>
+        )
+      )}
+      <div className="grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] gap-3">
+        <ZipField
+          key={value.city /* switch between plain input and ZIP list cleanly */}
+          options={cityZips}
+          value={value.zip_code}
+          onChange={setZip}
+          disabled={disabled}
+        />
         <Autocomplete
           {...common}
           {...searchLook}
           label="State"
           isRequired
-          placeholder="Type a state or code, e.g. TX"
+          placeholder="Type to search"
           defaultItems={stateItems}
           selectedKey={value.state || null}
           onSelectionChange={(key) => setState(key ? String(key) : "")}
@@ -227,29 +290,22 @@ export function AddressFields({ value, onChange, disabled }: Props) {
             </AutocompleteItem>
           )}
         </Autocomplete>
-
-        <CityAutocomplete
-          key={value.state /* fresh search text when the state changes */}
-          state={value.state}
-          names={names}
-          loading={loading}
-          value={value.city}
-          onChange={setCity}
-          disabled={disabled}
-        />
       </div>
 
-      <div className="grid grid-cols-2 gap-3">
-        <ZipField
-          key={value.city /* switch between plain input and ZIP list cleanly */}
-          options={cityZips}
-          value={value.zip_code}
-          onChange={set("zip_code")}
-          disabled={disabled}
-        />
+      <CityAutocomplete
+        key={value.state /* fresh search text when the state changes */}
+        state={value.state}
+        names={names}
+        loading={loading}
+        value={value.city}
+        onChange={setCity}
+        disabled={disabled}
+      />
+
+      <div className="grid grid-cols-1 gap-3 @md:grid-cols-2">
         <Input {...common} label="Phone" type="tel" isRequired autoComplete="tel" value={value.phone} onValueChange={set("phone")} />
+        <Input {...common} label="Email (optional)" type="email" autoComplete="email" value={value.email} onValueChange={set("email")} />
       </div>
-      <Input {...common} label="Email (optional)" type="email" autoComplete="email" value={value.email} onValueChange={set("email")} />
     </div>
   );
 }

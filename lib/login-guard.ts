@@ -1,5 +1,6 @@
 import "server-only";
-import { createHash, randomUUID } from "crypto";
+import { randomUUID } from "crypto";
+import { clientIp, hashIp } from "./request";
 import { addLoginFailure, clearLoginAttempts, getLoginAttempts, lockLogin } from "./db";
 
 /**
@@ -22,13 +23,6 @@ export function lockDuration(level: number) {
   return Math.min(FIRST_LOCK_MS * 2 ** level, MAX_LOCK_MS);
 }
 
-function clientIp(req: Request) {
-  // Vercel sets x-real-ip; elsewhere fall back to the first x-forwarded-for hop.
-  return req.headers.get("x-real-ip") || req.headers.get("x-forwarded-for")?.split(",")[0].trim() || "unknown";
-}
-
-const hash = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 32);
-
 /** The device id from its cookie, or a new one to set. */
 export function deviceId(req: Request) {
   const cookie = req.headers
@@ -42,7 +36,7 @@ export function deviceId(req: Request) {
 
 /** Storage keys for this request. IPs are hashed so raw addresses aren't stored. */
 export function guardKeys(req: Request, device: string) {
-  return [`device:${device}`, `ip:${hash(clientIp(req))}`];
+  return [`device:${device}`, `ip:${hashIp(clientIp(req))}`];
 }
 
 /** If any key is locked, when the lock ends. */

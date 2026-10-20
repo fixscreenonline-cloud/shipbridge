@@ -1,8 +1,23 @@
-import { LoginForm } from "@/components/LoginForm";
+import NextLink from "next/link";
+import { LoginScreen } from "@/components/LoginScreen";
+import { safeNextPath } from "@/lib/safe-redirect";
 
-export default async function LoginPage({ searchParams }: { searchParams: Promise<{ next?: string }> }) {
+export default async function AdminLoginPage({ searchParams }: { searchParams: Promise<{ next?: string }> }) {
   const { next } = await searchParams;
-  // Only allow same-site relative redirects.
-  const safeNext = next && next.startsWith("/") && !next.startsWith("//") ? next : "/admin";
-  return <LoginForm next={safeNext} />;
+  return (
+    <LoginScreen
+      next={safeNextPath(next)} // only same-site admin paths (see lib/safe-redirect.ts)
+      endpoint="/api/admin/login"
+      title="Admin sign in"
+      subtitle="Manage margin, shipments, drafts and security."
+      footnote={
+        <>
+          Here to book a label?{" "}
+          <NextLink href="/" className="font-medium text-white underline">
+            Use the booking sign-in
+          </NextLink>
+        </>
+      }
+    />
+  );
 }

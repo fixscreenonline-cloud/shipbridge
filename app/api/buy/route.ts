@@ -1,58 +1,62 @@
 import { NextResponse } from "next/server";
 import { BuyRequestSchema } from "@/lib/validation";
-import { buyLabel, type SSLabel } from "@/lib/shipsaving";
+import { buyLabel, CarrierApiError, type ShippoTransaction } from "@/lib/shippo";
 import { addShipment, claimQuote, getDraft, releaseQuote } from "@/lib/db";
 import { round2 } from "@/lib/pricing";
 import { errorResponse } from "@/lib/http";
-import type { Quote, ShipmentDetails, ShipmentParty } from "@/lib/types";
+import type { Address, Draft, Quote, ShipmentDetails, ShipmentParty } from "@/lib/types";
+import { requireUser } from "@/lib/session";
+import { BodyError, readJson, safeHttpUrl } from "@/lib/request";
 
 export const runtime = "nodejs";
 
-const str = (v: unknown) => (v == null ? "" : String(v));
-const num = (v: unknown) => {
-  if (v == null || v === "") return null;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-};
-
-function party(label: SSLabel, side: "from" | "to"): ShipmentParty | null {
-  const get = (f: string) => str((label as Record<string, unknown>)[`${side}_${f}`]);
-  if (!get("name") && !get("street")) return null;
+function party(a: Address): ShipmentParty {
   return {
-    name: get("name"),
-    company: get("company"),
-    phone: get("phone"),
-    street: get("street"),
-    street2: get("street2"),
-    city: get("city"),
-    state: get("state"),
-    zip: get("zip"),
-    country: get("country") || "US",
+    name: `${a.first_name} ${a.last_name}`.trim(),
+    company: a.company_name ?? "",
+    phone: a.phone ?? "",
+    street: a.street,
+    street2: a.street2 ?? "",
+    city: a.city,
+    state: a.state,
+    zip: a.zip_code,
+    country: a.country || "US",
   };
 }
 
-/** Everything worth keeping about the booking, taken from ShipSaving's purchase response. */
-function details(label: SSLabel, quote: Quote): ShipmentDetails {
-  const l = num(label.length), w = num(label.width), h = num(label.height), wt = num(label.weight);
+/** Everything worth keeping about the booking: the quote, the form inputs (draft) and Shippo's label. */
+function details(tx: ShippoTransaction, quote: Quote, draft: Draft | null): ShipmentDetails {
+  const p = draft?.package;
   return {
-    from: party(label, "from"),
-    to: party(label, "to"),
-    parcel: l && w && h && wt ? { length: l, width: w, height: h, weight: wt } : null,
-    carrier: quote.carrierCode || str(label.carrier), // same source as the service name
+    from: draft ? party(draft.from) : null,
+    to: draft ? party(draft.to) : null,
+    parcel: p
+      ? { length: p.length, width: p.width, height: p.height, weight: p.weight, distanceUnit: p.dimension_unit, massUnit: p.weight_unit }
+      : null,
+    carrier: quote.carrierCode,
     service: quote.serviceName,
-    deliveryDays: str(label.delivery_days) || quote.deliveryDays,
-    labelRate: num(label.rate),
-    serviceFee: num(label.service_fee) ?? 0,
-    insuranceFee: num(label.insurance_fee) ?? 0,
-    publishedRate: num(label.published_rate),
+    deliveryDays: quote.deliveryDays,
+    trackingUrl: safeHttpUrl(tx.tracking_url_provider),
+    labelRate: quote.cost,
+    serviceFee: 0,
+    insuranceFee: 0,
+    publishedRate: null,
     quotedCost: quote.cost,
     flatFee: quote.flatFee,
-    labelStatus: str(label.label_status) || null,
+    labelStatus: tx.status ? tx.status.toLowerCase() : null,
   };
 }
 
 export async function POST(req: Request) {
-  const parsed = BuyRequestSchema.safeParse(await req.json().catch(() => null));
+  const auth = await requireUser(req); // booking login or admin
+  if ("response" in auth) return auth.response;
+  let raw: unknown;
+  try {
+    raw = await readJson(req, 2 * 1024);
+  } catch (e) {
+    return NextResponse.json({ error: (e as Error).message }, { status: (e as BodyError).status ?? 400 });
+  }
+  const parsed = BuyRequestSchema.safeParse(raw);
   if (!parsed.success) return NextResponse.json({ error: "Choose a rate first." }, { status: 400 });
   const { rateId } = parsed.data;
 
@@ -65,21 +69,18 @@ export async function POST(req: Request) {
   // (e.g. Stripe PaymentIntent) and only continue once payment succeeds.
 
   try {
-    const label = await buyLabel(rateId);
-    // Keep the form inputs with the booking so it can be re-quoted after the draft is gone.
+    const tx = await buyLabel(rateId);
+    // The draft holds the form inputs; keep them with the booking so it can be re-quoted later.
     const draft = quote.draftId ? await getDraft(quote.draftId).catch(() => null) : null;
 
-    // What ShipSaving actually charged: label rate + service fee + insurance, falling back to the quote.
-    const cost =
-      typeof label.rate === "number"
-        ? round2(label.rate + (label.service_fee ?? 0) + (label.insurance_fee ?? 0))
-        : quote.cost;
+    // Shippo charges the rate amount that was quoted.
+    const cost = quote.cost;
     const record = {
       id: crypto.randomUUID(),
       createdAt: new Date().toISOString(),
       rateId,
-      shipmentNo: String(label.shipment_id),
-      trackingNo: label.tracking_code || null,
+      shipmentNo: tx.object_id,
+      trackingNo: tx.tracking_number || null,
       carrierCode: quote.carrierCode,
       serviceName: quote.serviceName,
       recipient: quote.recipient,
@@ -88,8 +89,8 @@ export async function POST(req: Request) {
       profit: round2(quote.price - cost),
       marginPercent: quote.marginPercent,
       currency: quote.currency,
-      labelUrls: label.label_url ?? [],
-      details: details(label, quote),
+      labelUrls: safeHttpUrl(tx.label_url) ? [safeHttpUrl(tx.label_url)!] : [],
+      details: details(tx, quote, draft),
       ...(draft ? { request: { from: draft.from, to: draft.to, package: draft.package, shipDate: draft.shipDate } } : {}),
     };
     await addShipment(record);
@@ -105,7 +106,19 @@ export async function POST(req: Request) {
       },
     });
   } catch (err) {
-    await releaseQuote(rateId);
-    return errorResponse(err);
+    // Free the rate for another try only when Shippo clearly refused it (4xx / label status ERROR).
+    // After a timeout or server error the label may have been bought anyway; retrying could pay twice.
+    if (err instanceof CarrierApiError && err.status >= 400 && err.status < 500) {
+      await releaseQuote(rateId);
+      return errorResponse(err);
+    }
+    console.error("[buy] outcome unknown for rate", rateId, err);
+    return NextResponse.json(
+      {
+        error:
+          "We couldn't confirm the purchase. To avoid paying twice, this rate is now locked. Check your Shippo dashboard for the label before trying again with new rates.",
+      },
+      { status: 502 },
+    );
   }
 }

@@ -4,7 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 import { Button, Chip, Tab, Tabs, addToast } from "@heroui/react";
 import { ArrowRightIcon } from "./icons";
 import { formatMoney } from "@/lib/pricing";
-import type { Address, Draft, ShipmentDetails, ShipmentParty, ShipmentRequest } from "@/lib/types";
+import { bookingRequest } from "@/lib/requests";
+import type { Address, Draft, ShipmentDetails, ShipmentRequest } from "@/lib/types";
 
 type Booking = {
   id: string;
@@ -17,35 +18,6 @@ type Booking = {
   request: ShipmentRequest | null;
   details: ShipmentDetails | null;
 };
-
-/** Older bookings only have ShipSaving's copy of the addresses; turn that back into form fields. */
-function partyToAddress(p: ShipmentParty): Address {
-  const [first = "", ...rest] = p.name.trim().split(/\s+/);
-  return {
-    first_name: first,
-    last_name: rest.join(" "),
-    company_name: p.company,
-    phone: p.phone,
-    email: "",
-    street: p.street,
-    street2: p.street2,
-    city: p.city,
-    state: p.state,
-    zip_code: p.zip,
-    country: p.country || "US",
-  };
-}
-
-function bookingRequest(b: Booking): ShipmentRequest | null {
-  if (b.request) return b.request;
-  const d = b.details;
-  if (!d?.from || !d.to || !d.parcel) return null;
-  return {
-    from: partyToAddress(d.from),
-    to: partyToAddress(d.to),
-    package: { ...d.parcel, dimension_unit: "in", weight_unit: "lb" },
-  };
-}
 
 const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
 function ago(iso: string) {
@@ -89,7 +61,7 @@ function Item({
             Delete
           </Button>
         )}
-        <Button size="sm" color="primary" variant="flat" className="font-semibold" onPress={onUse}>
+        <Button size="sm" color="primary" className="font-semibold" onPress={onUse}>
           Use
         </Button>
       </div>
@@ -101,9 +73,17 @@ function Item({
  * Drafts (price checks from the last 24 hours) and recent bookings, with a button to refill the form.
  * Admin only: the data comes from /api/admin/recent, so for everyone else this renders nothing.
  */
-export function RecentPanel({ refreshKey, onUse }: { refreshKey: number; onUse: (req: ShipmentRequest, what: string) => void }) {
+export function RecentPanel({
+  refreshKey,
+  onUse,
+  defaultOpen = true,
+}: {
+  refreshKey: number;
+  onUse: (req: ShipmentRequest, what: string) => void;
+  defaultOpen?: boolean;
+}) {
   const [data, setData] = useState<{ drafts: Draft[]; bookings: Booking[] } | null>(null);
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(defaultOpen);
   const [tab, setTab] = useState<"drafts" | "bookings">("drafts");
 
   const load = useCallback(async () => {

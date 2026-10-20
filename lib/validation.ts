@@ -2,23 +2,26 @@ import { z } from "zod";
 import { US_STATE_CODES } from "./us-states";
 
 // Optional text: "", null and missing all mean "not given" (saved drafts can hold nulls).
-const optionalText = z
-  .string()
-  .trim()
-  .nullish()
-  .transform((v) => (v ? v : undefined));
+const optionalText = (max = 100) =>
+  z
+    .string()
+    .trim()
+    .max(max, `Keep this under ${max} characters`)
+    .nullish()
+    .transform((v) => (v ? v : undefined));
 
-const required = (label: string) => z.string().trim().min(1, `${label} is required`);
+const required = (label: string, max = 100) =>
+  z.string().trim().min(1, `${label} is required`).max(max, `${label} is too long`);
 
 export const AddressSchema = z.object({
-  first_name: required("First name"),
-  last_name: required("Last name"),
-  company_name: optionalText,
+  first_name: required("First name", 60),
+  last_name: required("Last name", 60),
+  company_name: optionalText(100),
   phone: required("Phone").regex(/^[0-9+()\-\s]{7,20}$/, "Enter a valid phone number"),
-  email: optionalText.pipe(z.string().email("Enter a valid email").optional()),
-  street: required("Street"),
-  street2: optionalText,
-  city: required("City"),
+  email: optionalText(254).pipe(z.string().email("Enter a valid email").optional()),
+  street: required("Street", 120),
+  street2: optionalText(120),
+  city: required("City", 80),
   state: z.enum(US_STATE_CODES, { errorMap: () => ({ message: "Choose a US state" }) }),
   zip_code: required("ZIP code").regex(/^\d{5}(-\d{4})?$/, "Enter a 5-digit ZIP code"),
   // US domestic only.
@@ -26,7 +29,10 @@ export const AddressSchema = z.object({
 });
 
 const positive = (label: string) =>
-  z.coerce.number({ invalid_type_error: `${label} must be a number` }).positive(`${label} must be more than 0`);
+  z.coerce
+    .number({ invalid_type_error: `${label} must be a number` })
+    .positive(`${label} must be more than 0`)
+    .max(10000, `${label} is too large`);
 
 export const PackageSchema = z.object({
   length: positive("Length"),
@@ -51,7 +57,7 @@ export const RateRequestSchema = z.object({
 });
 
 export const BuyRequestSchema = z.object({
-  rateId: z.string().trim().min(1),
+  rateId: z.string().trim().min(1).max(100),
 });
 
 export const SettingsSchema = z.object({

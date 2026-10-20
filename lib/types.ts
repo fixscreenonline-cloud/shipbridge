@@ -25,7 +25,7 @@ export type PackageInput = {
 };
 
 export type MarginSettings = {
-  /** Percentage added on top of the ShipSaving price, e.g. 15 = +15% */
+  /** Percentage added on top of the carrier (Shippo) price, e.g. 15 = +15% */
   percent: number;
   /** Fixed amount added per label, in USD */
   flatFee: number;
@@ -70,7 +70,7 @@ export type ShipmentRecord = {
   marginPercent: number;
   currency: string;
   labelUrls: string[];
-  /** Full booking details from ShipSaving's purchase response. Missing on older records. */
+  /** Full booking details, saved at purchase. Missing on older records. */
   details?: ShipmentDetails;
   /** The form inputs used to quote this label, so it can be re-quoted. Missing on older records. */
   request?: ShipmentRequest;
@@ -91,16 +91,25 @@ export type ShipmentParty = {
 export type ShipmentDetails = {
   from: ShipmentParty | null;
   to: ShipmentParty | null;
-  /** Inches and pounds. */
-  parcel: { length: number; width: number; height: number; weight: number } | null;
+  /** Units default to in / lb on records saved before units were stored. */
+  parcel: {
+    length: number;
+    width: number;
+    height: number;
+    weight: number;
+    distanceUnit?: DimensionUnit;
+    massUnit?: WeightUnit;
+  } | null;
   carrier: string;
   service: string;
   deliveryDays: string | null;
-  /** Cost breakdown as charged by ShipSaving. */
+  /** Carrier tracking page, when the carrier provides one. */
+  trackingUrl?: string | null;
+  /** Cost breakdown as charged by the shipping provider. */
   labelRate: number | null;
   serviceFee: number;
   insuranceFee: number;
-  /** Carrier's list price before ShipSaving's discount. */
+  /** Carrier's list price before discount, when known. */
   publishedRate: number | null;
   /** What the quote said the label would cost, before fees. */
   quotedCost: number;
@@ -126,5 +135,7 @@ export type Draft = ShipmentRequest & {
   updatedAt: string;
   rateCount: number;
   lowestPrice: number | null;
+  /** Why some carriers didn't quote (from Shippo). Shown to the admin only. */
+  carrierNotes?: { carrier: string; message: string }[];
   currency: string;
 };

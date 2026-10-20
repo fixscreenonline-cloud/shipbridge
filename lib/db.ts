@@ -47,6 +47,43 @@ export type LoginAttempts = {
 /** Lock records are forgotten this long after the last activity (so the lockout level eventually resets). */
 const ATTEMPTS_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** Two-factor sign-in settings. Secrets are stored encrypted (see lib/totp.ts). */
+export type SecuritySettings = {
+  totpSecret: string | null;
+  /** Secret shown during setup, until the first code confirms it. */
+  totpPending: string | null;
+  totpEnabledAt: string | null;
+  /** Last accepted code's time step, so a code can't be used twice. */
+  totpLastStep: number;
+  /** Booking login (home screen). Null until set in Admin → Security; BOOKING_* env vars are the fallback. */
+  bookingUsername: string | null;
+  bookingPasswordHash: string | null;
+  bookingUpdatedAt: string | null;
+};
+const defaultSecurity = (): SecuritySettings => ({
+  totpSecret: null,
+  totpPending: null,
+  totpEnabledAt: null,
+  totpLastStep: -1,
+  bookingUsername: null,
+  bookingPasswordHash: null,
+  bookingUpdatedAt: null,
+});
+
+/** "admin" can use everything; "user" (booking login) can get rates and book labels only. */
+export type Role = "admin" | "user";
+
+/** A signed-in admin session. Signing out deletes it, so its cookie stops working right away. */
+export type AdminSession = {
+  id: string;
+  createdAt: string;
+  expiresAt: string;
+  userAgent: string;
+  /** Missing on sessions created before roles existed; those were admin sign-ins. */
+  role?: Role;
+  username?: string;
+};
+
 type Store = {
   getSettings(): Promise<MarginSettings>;
   updateSettings(input: { percent: number; flatFee: number }): Promise<MarginSettings>;
@@ -71,6 +108,21 @@ type Store = {
   /** Starts a lockout: failures back to 0, level + 1. Skipped if another request already did it. */
   lockLogin(key: string, seenFailures: number, lockedUntil: string): Promise<void>;
   clearLoginAttempts(keys: string[]): Promise<void>;
+  /** Devices/IPs locked right now. */
+  listLockedLogins(): Promise<{ key: string; lockedUntil: string; level: number }[]>;
+  clearAllLoginAttempts(): Promise<void>;
+  getSecurity(): Promise<SecuritySettings>;
+  updateSecurity(patch: Partial<SecuritySettings>): Promise<SecuritySettings>;
+  createSession(s: AdminSession): Promise<void>;
+  /** The session if it exists and hasn't expired. */
+  getSession(id: string): Promise<AdminSession | null>;
+  listSessions(): Promise<AdminSession[]>;
+  deleteSession(id: string): Promise<void>;
+  /** Signs out every session except `keepId` (or all of them). */
+  deleteOtherSessions(keepId?: string): Promise<void>;
+  deleteSessionsByRole(role: Role): Promise<void>;
+  /** Counts one hit for `key` in the current fixed window and returns the count so far. */
+  rateLimitHit(key: string, windowMs: number): Promise<number>;
 };
 
 // ---------------------------------------------------------------------------
@@ -81,6 +133,9 @@ type DraftDoc = Draft & { _id: string; expiresAt: Date };
 type ShipmentDoc = ShipmentRecord & { _id: string };
 type SettingsDoc = MarginSettings & { _id: string };
 type AttemptsDoc = LoginAttempts & { _id: string; expiresAt: Date };
+type SecurityDoc = SecuritySettings & { _id: string };
+type SessionDoc = AdminSession & { _id: string; expiresAtDate: Date };
+type RateDoc = { _id: string; count: number; expiresAt: Date };
 
 function mongoStore(getDb: () => Promise<Db>): Store {
   const col = async () => {
@@ -91,6 +146,9 @@ function mongoStore(getDb: () => Promise<Db>): Store {
       drafts: db.collection<DraftDoc>("drafts"),
       shipments: db.collection<ShipmentDoc>("shipments"),
       attempts: db.collection<AttemptsDoc>("login_attempts"),
+      security: db.collection<SecurityDoc>("settings"),
+      sessions: db.collection<SessionDoc>("admin_sessions"),
+      rates: db.collection<RateDoc>("rate_limits"),
     };
   };
   const strip = <T extends { _id: string }>({ _id, ...rest }: T) => rest;
@@ -200,6 +258,54 @@ function mongoStore(getDb: () => Promise<Db>): Store {
     async clearLoginAttempts(keys) {
       await (await col()).attempts.deleteMany({ _id: { $in: keys } });
     },
+    async listLockedLogins() {
+      const now = new Date().toISOString();
+      const docs = await (await col()).attempts.find({ lockedUntil: { $gt: now } }).toArray();
+      return docs.map((d) => ({ key: d._id, lockedUntil: d.lockedUntil!, level: d.level }));
+    },
+    async clearAllLoginAttempts() {
+      await (await col()).attempts.deleteMany({});
+    },
+    async getSecurity() {
+      const doc = await (await col()).security.findOne({ _id: "security" });
+      return doc ? { ...defaultSecurity(), ...strip(doc) } : defaultSecurity();
+    },
+    async updateSecurity(patch) {
+      const { security } = await col();
+      await security.updateOne({ _id: "security" }, { $set: patch }, { upsert: true });
+      return { ...defaultSecurity(), ...strip((await security.findOne({ _id: "security" }))!) };
+    },
+    async createSession(sess) {
+      await (await col()).sessions.insertOne({ _id: sess.id, ...sess, expiresAtDate: new Date(sess.expiresAt) });
+    },
+    async getSession(id) {
+      const doc = await (await col()).sessions.findOne({ _id: id, expiresAtDate: { $gt: new Date() } });
+      if (!doc) return null;
+      const { _id, expiresAtDate, ...sess } = doc;
+      return sess;
+    },
+    async listSessions() {
+      const docs = await (await col()).sessions.find({ expiresAtDate: { $gt: new Date() } }).sort({ createdAt: -1 }).toArray();
+      return docs.map(({ _id, expiresAtDate, ...sess }) => sess);
+    },
+    async deleteSession(id) {
+      await (await col()).sessions.deleteOne({ _id: id });
+    },
+    async deleteOtherSessions(keepId) {
+      await (await col()).sessions.deleteMany(keepId ? { _id: { $ne: keepId } } : {});
+    },
+    async deleteSessionsByRole(role) {
+      await (await col()).sessions.deleteMany({ role });
+    },
+    async rateLimitHit(key, windowMs) {
+      const windowStart = Math.floor(Date.now() / windowMs) * windowMs;
+      const doc = await (await col()).rates.findOneAndUpdate(
+        { _id: `${key}@${windowStart}` },
+        { $inc: { count: 1 }, $setOnInsert: { expiresAt: new Date(windowStart + windowMs) } },
+        { upsert: true, returnDocument: "after" },
+      );
+      return doc?.count ?? 1;
+    },
   };
 }
 
@@ -212,12 +318,25 @@ type FileDB = {
   quotes: Record<string, Quote>;
   shipments: ShipmentRecord[];
   loginAttempts: Record<string, LoginAttempts>;
+  security: SecuritySettings;
+  sessions: Record<string, AdminSession>;
+  rateLimits: Record<string, { count: number; expiresAt: number }>;
 };
 
 function fileStore(): Store {
   const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(process.cwd(), "data"));
   const DB_FILE = path.join(DATA_DIR, "shipbridge.json");
-  const empty = (): FileDB => ({ settings: defaultSettings(), drafts: {}, quotes: {}, shipments: [], loginAttempts: {} });
+  const empty = (): FileDB => ({
+    settings: defaultSettings(),
+    drafts: {},
+    quotes: {},
+    shipments: [],
+    loginAttempts: {},
+    security: defaultSecurity(),
+    sessions: {},
+    rateLimits: {},
+  });
+  const live = (x: AdminSession) => Date.parse(x.expiresAt) > Date.now();
   const fresh = (d: Draft) => Date.parse(d.updatedAt) > Date.now() - DRAFT_KEEP_MS;
 
   /** Deletes drafts and quotes older than 24 hours. */
@@ -341,6 +460,64 @@ function fileStore(): Store {
         for (const k of keys) delete db.loginAttempts[k];
       });
     },
+    async listLockedLogins() {
+      const now = Date.now();
+      return Object.entries((await read()).loginAttempts)
+        .filter(([, a]) => a.lockedUntil && Date.parse(a.lockedUntil) > now)
+        .map(([key, a]) => ({ key, lockedUntil: a.lockedUntil!, level: a.level }));
+    },
+    clearAllLoginAttempts() {
+      return mutate((db) => {
+        db.loginAttempts = {};
+      });
+    },
+    async getSecurity() {
+      return { ...defaultSecurity(), ...(await read()).security };
+    },
+    updateSecurity(patch) {
+      return mutate((db) => (db.security = { ...defaultSecurity(), ...db.security, ...patch }));
+    },
+    createSession(sess) {
+      return mutate((db) => {
+        for (const [id, x] of Object.entries(db.sessions)) if (!live(x)) delete db.sessions[id];
+        db.sessions[sess.id] = sess;
+      });
+    },
+    async getSession(id) {
+      const x = (await read()).sessions[id];
+      return x && live(x) ? x : null;
+    },
+    async listSessions() {
+      return Object.values((await read()).sessions)
+        .filter(live)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    },
+    deleteSession(id) {
+      return mutate((db) => {
+        delete db.sessions[id];
+      });
+    },
+    deleteOtherSessions(keepId) {
+      return mutate((db) => {
+        for (const id of Object.keys(db.sessions)) if (id !== keepId) delete db.sessions[id];
+      });
+    },
+    deleteSessionsByRole(role) {
+      return mutate((db) => {
+        for (const [id, x] of Object.entries(db.sessions)) if (x.role === role) delete db.sessions[id];
+      });
+    },
+    rateLimitHit(key, windowMs) {
+      return mutate((db) => {
+        const now = Date.now();
+        for (const [k, r] of Object.entries(db.rateLimits)) if (r.expiresAt <= now) delete db.rateLimits[k];
+        const windowStart = Math.floor(now / windowMs) * windowMs;
+        const id = `${key}@${windowStart}`;
+        const r = (db.rateLimits[id] ??= { count: 0, expiresAt: windowStart + windowMs });
+        r.count += 1;
+        return r.count;
+      });
+    },
   };
 }
 
@@ -364,6 +541,8 @@ function connect(): Promise<Db> {
         db.collection("drafts").createIndex({ updatedAt: -1 }),
         db.collection("shipments").createIndex({ createdAt: -1 }),
         db.collection("login_attempts").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
+        db.collection("admin_sessions").createIndex({ expiresAtDate: 1 }, { expireAfterSeconds: 0 }),
+        db.collection("rate_limits").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
       ]);
       return db;
     })().catch((err) => {
@@ -401,3 +580,14 @@ export const getLoginAttempts = (keys: string[]) => db().getLoginAttempts(keys);
 export const addLoginFailure = (key: string) => db().addLoginFailure(key);
 export const lockLogin = (key: string, seenFailures: number, lockedUntil: string) => db().lockLogin(key, seenFailures, lockedUntil);
 export const clearLoginAttempts = (keys: string[]) => db().clearLoginAttempts(keys);
+export const listLockedLogins = () => db().listLockedLogins();
+export const clearAllLoginAttempts = () => db().clearAllLoginAttempts();
+export const getSecurity = () => db().getSecurity();
+export const updateSecurity = (patch: Partial<SecuritySettings>) => db().updateSecurity(patch);
+export const createSession = (s: AdminSession) => db().createSession(s);
+export const getSession = (id: string) => db().getSession(id);
+export const listSessions = () => db().listSessions();
+export const deleteSession = (id: string) => db().deleteSession(id);
+export const deleteOtherSessions = (keepId?: string) => db().deleteOtherSessions(keepId);
+export const rateLimitHit = (key: string, windowMs: number) => db().rateLimitHit(key, windowMs);
+export const deleteSessionsByRole = (role: Role) => db().deleteSessionsByRole(role);

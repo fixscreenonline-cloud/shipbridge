@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import NextLink from "next/link";
 import {
   Button,
   Chip,
@@ -22,6 +23,7 @@ import {
 } from "@heroui/react";
 import { SearchIcon } from "./icons";
 import { formatMoney, round2 } from "@/lib/pricing";
+import { bookingRequest } from "@/lib/requests";
 import type { ShipmentParty, ShipmentRecord } from "@/lib/types";
 
 type Period = "all" | "today" | "7d" | "30d";
@@ -41,14 +43,21 @@ const dateTime = (iso: string) =>
 function toCsv(rows: ShipmentRecord[]) {
   const head = [
     "Date", "Shipment", "Tracking", "Carrier", "Service", "Recipient",
-    "From", "To", "Parcel (in/lb)", "ShipSaving cost", "Customer paid", "Profit", "Margin %", "Label URL",
+    "From", "To", "Parcel", "Shippo cost", "Customer paid", "Profit", "Margin %", "Label URL",
   ];
   const addr = (p: ShipmentParty | null | undefined) =>
     p ? [p.name, p.company, p.street, p.street2, `${p.city}, ${p.state} ${p.zip}`].filter(Boolean).join(", ") : "";
-  const cell = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  // Text starting with = + - @ (or tab/CR) would run as a formula in Excel/Sheets; prefix ' to keep it text.
+  const cell = (v: unknown) => {
+    let t = String(v ?? "");
+    if (/^[=+\-@\t\r]/.test(t)) t = `'${t}`;
+    return `"${t.replace(/"/g, '""')}"`;
+  };
   const lines = rows.map((s) => {
     const d = s.details;
-    const parcel = d?.parcel ? `${d.parcel.length}x${d.parcel.width}x${d.parcel.height} / ${d.parcel.weight}` : "";
+    const parcel = d?.parcel
+      ? `${d.parcel.length}x${d.parcel.width}x${d.parcel.height} ${d.parcel.distanceUnit ?? "in"} / ${d.parcel.weight} ${d.parcel.massUnit ?? "lb"}`
+      : "";
     return [
       s.createdAt, s.shipmentNo, s.trackingNo, d?.carrier ?? s.carrierCode, s.serviceName, s.recipient,
       addr(d?.from), addr(d?.to), parcel, s.cost, s.charged, s.profit, s.marginPercent, s.labelUrls[0],
@@ -123,6 +132,11 @@ function Details({ s }: { s: ShipmentRecord }) {
               Copy
             </Button>
           )}
+          {d?.trackingUrl && /^https?:\/\//i.test(d.trackingUrl) && (
+            <Button size="sm" variant="light" as="a" href={d.trackingUrl} target="_blank" rel="noopener">
+              Track
+            </Button>
+          )}
         </div>
       </section>
 
@@ -130,9 +144,9 @@ function Details({ s }: { s: ShipmentRecord }) {
         <p className="mb-1 text-xs font-medium uppercase tracking-wide text-steel">Money</p>
         <dl className="divide-y divide-dashed divide-ink/15 text-sm">
           {d?.labelRate != null && <Row label="Label rate" value={formatMoney(d.labelRate, s.currency)} />}
-          {!!d?.serviceFee && <Row label="ShipSaving service fee" value={formatMoney(d.serviceFee, s.currency)} />}
+          {!!d?.serviceFee && <Row label="Service fee" value={formatMoney(d.serviceFee, s.currency)} />}
           {!!d?.insuranceFee && <Row label="Insurance" value={formatMoney(d.insuranceFee, s.currency)} />}
-          <Row label="Your cost (ShipSaving)" value={formatMoney(s.cost, s.currency)} strong />
+          <Row label="Your cost (Shippo)" value={formatMoney(s.cost, s.currency)} strong />
           <Row
             label={`Margin ${s.marginPercent}%${d?.flatFee ? ` + ${formatMoney(d.flatFee, s.currency)} fee` : ""}`}
             value={`+${formatMoney(round2(s.charged - (d?.quotedCost ?? s.cost)), s.currency)}`}
@@ -158,7 +172,8 @@ function Details({ s }: { s: ShipmentRecord }) {
         <p className="mb-1 text-xs font-medium uppercase tracking-wide text-steel">Parcel</p>
         {d?.parcel ? (
           <p>
-            {d.parcel.length} × {d.parcel.width} × {d.parcel.height} in · {d.parcel.weight} lb
+            {d.parcel.length} × {d.parcel.width} × {d.parcel.height} {d.parcel.distanceUnit ?? "in"} · {d.parcel.weight}{" "}
+            {d.parcel.massUnit ?? "lb"}
           </p>
         ) : (
           <p className="text-steel">Not recorded</p>
@@ -180,10 +195,10 @@ function Details({ s }: { s: ShipmentRecord }) {
   );
 }
 
-export function ShipmentsPanel({ shipments }: { shipments: ShipmentRecord[] }) {
+export function ShipmentsPanel({ shipments, initialOpenId = null }: { shipments: ShipmentRecord[]; initialOpenId?: string | null }) {
   const [period, setPeriod] = useState<Period>("all");
   const [query, setQuery] = useState("");
-  const [openId, setOpenId] = useState<string | null>(null);
+  const [openId, setOpenId] = useState<string | null>(initialOpenId);
 
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -214,7 +229,7 @@ export function ShipmentsPanel({ shipments }: { shipments: ShipmentRecord[] }) {
   return (
     <section className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <h2 className="display text-2xl font-bold">Shipments</h2>
+        <p className="text-sm text-steel">Choose a row to see its details.</p>
         <Tabs aria-label="Period" size="sm" selectedKey={period} onSelectionChange={(k) => setPeriod(k as Period)}>
           <Tab key="all" title="All time" />
           <Tab key="today" title="Today" />
@@ -226,7 +241,7 @@ export function ShipmentsPanel({ shipments }: { shipments: ShipmentRecord[] }) {
       <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
         <Stat label="Labels" value={String(rows.length)} />
         <Stat label="Customers paid" value={formatMoney(totals.charged)} />
-        <Stat label="ShipSaving cost" value={formatMoney(totals.cost)} />
+        <Stat label="Shippo cost" value={formatMoney(totals.cost)} />
         <Stat label="Profit" value={formatMoney(round2(totals.profit))} tone={totals.profit < 0 ? "danger" : "success"} />
         <Stat label="Avg. markup" value={pct(totals.profit, totals.cost)} />
       </div>
@@ -305,11 +320,24 @@ export function ShipmentsPanel({ shipments }: { shipments: ShipmentRecord[] }) {
                   <Details s={open} />
                 </DrawerBody>
                 <DrawerFooter className="flex-wrap">
-                  {open.labelUrls.map((url, i) => (
-                    <Button key={url} as="a" href={url} target="_blank" rel="noopener" color="secondary" className="font-semibold">
-                      {open.labelUrls.length > 1 ? `Open label ${i + 1}` : "Open label"}
+                  {open.labelUrls.length > 0 && (
+                    // Goes through the server for a fresh link (Shippo label links expire).
+                    <Button
+                      as="a"
+                      href={`/api/admin/shipments/${encodeURIComponent(open.id)}/label`}
+                      target="_blank"
+                      rel="noopener"
+                      color="secondary"
+                      className="font-semibold"
+                    >
+                      Open label
                     </Button>
-                  ))}
+                  )}
+                  {bookingRequest(open) && (
+                    <Button as={NextLink} href={`/admin/ship?booking=${encodeURIComponent(open.id)}`} variant="bordered">
+                      Ship again
+                    </Button>
+                  )}
                   <Button variant="light" onPress={close}>
                     Close
                   </Button>

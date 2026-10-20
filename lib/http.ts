@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
-import { ShipSavingError } from "./shipsaving";
+import { CarrierApiError } from "./shippo";
 
 export function errorResponse(err: unknown) {
-  if (err instanceof ShipSavingError) {
-    console.error("[ShipSaving]", err.message, err.details ?? "");
+  if (err instanceof CarrierApiError) {
+    console.error("[Shippo]", err.message, err.details ?? "");
     return NextResponse.json({ error: err.message }, { status: err.status });
   }
   console.error(err);

@@ -1,10 +1,11 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import NextLink from "next/link";
 import { Alert, Button, Chip, Input, Skeleton, Tab, Tabs, addToast } from "@heroui/react";
 import { AddressFields, emptyAddress } from "./AddressFields";
 import { RecentPanel } from "./RecentPanel";
+import { AddressAssist } from "./AddressAssist";
 import { ArrowRightIcon, BoxIcon, CheckIcon, ClockIcon, SwapIcon, TruckIcon } from "./icons";
 import { formatMoney } from "@/lib/pricing";
 import type { Address, DimensionUnit, PublicRate, ShipmentRequest, WeightUnit } from "@/lib/types";
@@ -108,14 +109,73 @@ function Section({
   );
 }
 
-export function ShipmentForm() {
-  const [from, setFrom] = useState<Address>(emptyAddress);
-  const [to, setTo] = useState<Address>(emptyAddress);
-  const [pkg, setPkg] = useState<Pkg>(emptyPkg);
-  const [shipDate, setShipDate] = useState("");
+const toFormPkg = (p: ShipmentRequest["package"]): Pkg => ({
+  length: String(p.length),
+  width: String(p.width),
+  height: String(p.height),
+  dimension_unit: p.dimension_unit,
+  weight: String(p.weight),
+  weight_unit: p.weight_unit,
+});
+
+// An old ship date is likely in the past; keep it only if it's still ahead.
+const futureDate = (d?: string | null) => (d && d >= new Date().toISOString().slice(0, 10) ? d : "");
+
+type Props = {
+  /** Start with these inputs (from a draft or a past booking). */
+  initialRequest?: ShipmentRequest | null;
+  /** What the inputs came from, for the notice ("draft" or "booking"). */
+  prefilledFrom?: string;
+  /** Inside /admin: link the finished label to the Shipments page. */
+  admin?: boolean;
+  /** Hide the "New shipment" title (the page shows its own heading). */
+  hideTitle?: boolean;
+  /** Show recent drafts and bookings (admin only; booking logins can't read them). */
+  showRecent?: boolean;
+  /** Show "Scan / paste" on the address cards (needs ANTHROPIC_API_KEY on the server). */
+  scanEnabled?: boolean;
+};
+
+// The sender is usually the same every time: remember it on this device (no server copy) and offer
+// it as a one-tap option; it's never filled in without the user choosing it.
+const SENDER_KEY = "shipbridge:last-sender";
+function loadSender(): Address | null {
+  try {
+    const raw = localStorage.getItem(SENDER_KEY);
+    return raw ? toFormAddress(JSON.parse(raw)) : null;
+  } catch {
+    return null;
+  }
+}
+function saveSender(a: Address) {
+  try {
+    localStorage.setItem(SENDER_KEY, JSON.stringify(a));
+  } catch {
+    /* private mode or storage blocked: nothing to remember */
+  }
+}
+
+export function ShipmentForm({
+  initialRequest = null,
+  prefilledFrom,
+  admin = false,
+  hideTitle = false,
+  showRecent = true,
+  scanEnabled = false,
+}: Props = {}) {
+  const [from, setFrom] = useState<Address>(() => (initialRequest ? toFormAddress(initialRequest.from) : emptyAddress()));
+  const [to, setTo] = useState<Address>(() => (initialRequest ? toFormAddress(initialRequest.to) : emptyAddress()));
+  const [pkg, setPkg] = useState<Pkg>(() => (initialRequest ? toFormPkg(initialRequest.package) : emptyPkg));
+  const [shipDate, setShipDate] = useState(() => futureDate(initialRequest?.shipDate));
+  // The remembered sender, offered as "Use last sender" (read after mount: localStorage is browser-only).
+  const [lastSender, setLastSender] = useState<Address | null>(null);
+  useEffect(() => setLastSender(loadSender()), []);
+
+  const [notice, setNotice] = useState<string | null>(
+    initialRequest ? `Filled from a ${prefilledFrom ?? "saved shipment"}. Check the details, then choose Get rates.` : null,
+  );
 
   const [rates, setRates] = useState<PublicRate[] | null>(null);
-  const [carrierErrors, setCarrierErrors] = useState<{ carrier: string; message: string }[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [loadingRates, setLoadingRates] = useState(false);
   const [buying, setBuying] = useState(false);
@@ -169,9 +229,10 @@ export function ShipmentForm() {
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Could not get rates.");
       setRates(json.rates);
-      setCarrierErrors(json.carrierErrors ?? []);
       if (json.rates.length) setSelected(json.rates[0].rateId);
       setRecentKey((k) => k + 1);
+      saveSender(from); // a sender that got real rates is worth offering next time
+      setLastSender(from);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -218,17 +279,9 @@ export function ShipmentForm() {
   function fillFromRequest(req: ShipmentRequest, what: string) {
     setFrom(toFormAddress(req.from));
     setTo(toFormAddress(req.to));
-    const p = req.package;
-    setPkg({
-      length: String(p.length),
-      width: String(p.width),
-      height: String(p.height),
-      dimension_unit: p.dimension_unit,
-      weight: String(p.weight),
-      weight_unit: p.weight_unit,
-    });
-    // An old ship date is likely in the past; keep it only if it's still ahead.
-    setShipDate(req.shipDate && req.shipDate >= new Date().toISOString().slice(0, 10) ? req.shipDate : "");
+    setPkg(toFormPkg(req.package));
+    setShipDate(futureDate(req.shipDate));
+    setNotice(null);
     setRates(null);
     setSelected(null);
     setError(null);
@@ -278,6 +331,11 @@ export function ShipmentForm() {
             <Button variant="bordered" size="lg" onPress={reset}>
               Create another shipment
             </Button>
+            {admin && (
+              <Button as={NextLink} href="/admin/shipments" variant="light" size="lg">
+                View in Shipments
+              </Button>
+            )}
           </div>
         </div>
       </section>
@@ -296,11 +354,13 @@ export function ShipmentForm() {
   return (
     <div className="grid gap-8 lg:grid-cols-[1fr_380px]">
       <form onSubmit={fetchRates} className="space-y-6">
-        <div className="flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <h1 className="display text-3xl font-bold sm:text-4xl">New shipment</h1>
-            <p className="mt-2 max-w-prose text-steel">Enter both addresses and the parcel, then compare carrier prices. US only.</p>
-          </div>
+        <div className={`flex flex-wrap items-end justify-between gap-4 ${hideTitle && !isDev ? "hidden" : ""}`}>
+          {!hideTitle && (
+            <div>
+              <h1 className="display text-3xl font-bold sm:text-4xl">New shipment</h1>
+              <p className="mt-2 max-w-prose text-steel">Enter both addresses and the parcel, then compare carrier prices. US only.</p>
+            </div>
+          )}
           {isDev && (
             <Button size="sm" variant="flat" color="warning" onPress={fillSample} isDisabled={loadingRates}>
               Fill sample data (dev only)
@@ -308,20 +368,46 @@ export function ShipmentForm() {
           )}
         </div>
 
-        <RecentPanel refreshKey={recentKey} onUse={fillFromRequest} />
+        {notice && (
+          <Alert color="primary" variant="faded" title={notice} isClosable onClose={() => setNotice(null)} />
+        )}
+
+        {showRecent && <RecentPanel refreshKey={recentKey} onUse={fillFromRequest} defaultOpen={!admin} />}
 
         <div ref={formTopRef} className="@container scroll-mt-4">
           <div className="grid gap-6 @2xl:grid-cols-2">
-            <Section step={1} title="Ship from">
+            <Section
+              step={1}
+              title="Ship from"
+              action={
+                <div className="flex items-center gap-1">
+                  {lastSender && !from.street && !from.first_name && (
+                    <Button
+                      size="sm"
+                      variant="light"
+                      onPress={() => touch(setFrom)(lastSender)}
+                      isDisabled={loadingRates}
+                      title={`${lastSender.first_name} ${lastSender.last_name}, ${lastSender.city} ${lastSender.state}`}
+                    >
+                      Use last sender
+                    </Button>
+                  )}
+                  {scanEnabled && <AddressAssist role="sender" onFill={(a) => touch(setFrom)(toFormAddress(a))} disabled={loadingRates} />}
+                </div>
+              }
+            >
               <AddressFields value={from} onChange={touch(setFrom)} disabled={loadingRates} />
             </Section>
             <Section
               step={2}
               title="Ship to"
               action={
-                <Button size="sm" variant="light" onPress={swap} isDisabled={loadingRates} startContent={<SwapIcon />}>
-                  Swap
-                </Button>
+                <div className="flex items-center gap-1">
+                  <Button size="sm" variant="light" onPress={swap} isDisabled={loadingRates} startContent={<SwapIcon />}>
+                    Swap
+                  </Button>
+                  {scanEnabled && <AddressAssist role="recipient" onFill={(a) => touch(setTo)(toFormAddress(a))} disabled={loadingRates} />}
+                </div>
               }
             >
               <AddressFields value={to} onChange={touch(setTo)} disabled={loadingRates} />
@@ -467,7 +553,7 @@ export function ShipmentForm() {
                 className="mb-4"
                 title="Sign in to buy labels"
                 description={
-                  <NextLink href="/admin/login?next=/" className="underline">
+                  <NextLink href="/" className="underline">
                     Go to sign in
                   </NextLink>
                 }
@@ -550,19 +636,6 @@ export function ShipmentForm() {
                   );
                 })}
               </ul>
-            )}
-
-            {carrierErrors.length > 0 && (
-              <details className="mt-4 text-xs text-steel">
-                <summary className="cursor-pointer">{carrierErrors.length} carrier(s) couldn&apos;t quote</summary>
-                <ul className="mt-2 space-y-1">
-                  {carrierErrors.map((e, i) => (
-                    <li key={i}>
-                      <strong>{e.carrier}:</strong> {e.message}
-                    </li>
-                  ))}
-                </ul>
-              </details>
             )}
 
             {selectedRate && (

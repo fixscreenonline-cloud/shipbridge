@@ -1,21 +1,23 @@
 import { NextResponse } from "next/server";
 import { createHash } from "crypto";
 import { RateRequestSchema } from "@/lib/validation";
-import { getRates, type SSAddress } from "@/lib/shipsaving";
+import { createShipment, type ShippoAddress } from "@/lib/shippo";
 import { getSettings, saveDraftWithQuotes } from "@/lib/db";
-import { applyMargin, round2 } from "@/lib/pricing";
+import { applyMargin } from "@/lib/pricing";
 import { errorResponse } from "@/lib/http";
+import { BodyError, readJson } from "@/lib/request";
+import { requireUser } from "@/lib/session";
 import type { Address, Draft, PublicRate, Quote, ShipmentRequest } from "@/lib/types";
 
 export const runtime = "nodejs";
 
-function toSSAddress(a: Address): SSAddress {
+function toShippoAddress(a: Address): ShippoAddress {
   return {
     name: `${a.first_name} ${a.last_name}`.trim(),
     company: a.company_name,
     email: a.email,
     phone: a.phone,
-    street: a.street,
+    street1: a.street,
     street2: a.street2,
     city: a.city,
     state: a.state,
@@ -35,18 +37,55 @@ function draftId(req: ShipmentRequest) {
   return "d_" + createHash("sha256").update(key).digest("hex").slice(0, 24);
 }
 
-// "USPS_GROUND_ADVANTAGE" -> "USPS Ground Advantage"
-const SPECIAL_WORDS: Record<string, string> = { USPS: "USPS", UPS: "UPS", DHL: "DHL", FEDEX: "FedEx" };
-function serviceLabel(code: string) {
-  return code
-    .split(/[_\s]+/)
-    .filter(Boolean)
-    .map((w) => SPECIAL_WORDS[w.toUpperCase()] ?? w[0].toUpperCase() + w.slice(1).toLowerCase())
-    .join(" ");
+/** "shippo_colissimo_account" -> "Colissimo", "COURIERSPLEASE_SHIPPO_TIER_1" -> "Couriersplease". */
+function carrierFromAccount(text: string) {
+  const id = text.match(/carrier account (\S+)/i)?.[1];
+  if (!id) return null;
+  const name = id
+    .replace(/^shippo_/i, "")
+    .replace(/_(shippo|account|master|tier_\d+).*$/i, "")
+    .replace(/_/g, " ")
+    .toLowerCase();
+  return name.replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/**
+ * Shippo asks every carrier on the account, including ones that can't serve this shipment
+ * (e.g. international carriers for a US parcel), and explains each miss. Merge duplicates and
+ * name the carrier where the message allows.
+ */
+function carrierNotes(messages: { source?: string; text?: string }[]) {
+  const byText = new Map<string, Set<string>>();
+  for (const m of messages) {
+    if (!m.text) continue;
+    const carrier = carrierFromAccount(m.text) ?? (m.source && !/^shippo/i.test(m.source) ? m.source : null);
+    const text = m.text.replace(/carrier account \S+ doesn't/i, "Doesn't");
+    if (!byText.has(text)) byText.set(text, new Set());
+    if (carrier) byText.get(text)!.add(carrier);
+  }
+  return [...byText].map(([message, carriers]) => ({
+    carrier: carriers.size ? [...carriers].join(", ") : "Some carriers",
+    message,
+  }));
+}
+
+/** "Priority Mail" from USPS -> "USPS Priority Mail"; names that already include the carrier stay as-is. */
+function serviceLabel(provider: string, name: string | undefined) {
+  if (!name) return provider;
+  return name.toLowerCase().startsWith(provider.toLowerCase()) ? name : `${provider} ${name}`;
 }
 
 export async function POST(req: Request) {
-  const parsed = RateRequestSchema.safeParse(await req.json().catch(() => null));
+  // The site is private: only signed-in users (booking login or admin) can get rates.
+  const auth = await requireUser(req);
+  if ("response" in auth) return auth.response;
+  let raw: unknown;
+  try {
+    raw = await readJson(req, 16 * 1024);
+  } catch (e) {
+    return NextResponse.json({ error: (e as Error).message }, { status: (e as BodyError).status ?? 400 });
+  }
+  const parsed = RateRequestSchema.safeParse(raw);
   if (!parsed.success) {
     const first = parsed.error.issues[0];
     return NextResponse.json(
@@ -57,22 +96,21 @@ export async function POST(req: Request) {
   const { from, to, package: pkg, shipDate } = parsed.data;
 
   try {
-    // v1 only accepts inches and pounds.
-    const toIn = (n: number) => round2(pkg.dimension_unit === "cm" ? n / 2.54 : n);
-    const weightLb = pkg.weight_unit === "oz" ? pkg.weight / 16 : pkg.weight;
-
-    const ssRates = await getRates({
-      from: toSSAddress(from),
-      to: toSSAddress(to),
-      shipments: [
+    // Shippo accepts inches/cm and pounds/ounces directly.
+    const shipment = await createShipment({
+      address_from: toShippoAddress(from),
+      address_to: toShippoAddress(to),
+      parcels: [
         {
-          length: toIn(pkg.length),
-          width: toIn(pkg.width),
-          height: toIn(pkg.height),
-          weight: Math.max(round2(weightLb), 0.01),
+          length: String(pkg.length),
+          width: String(pkg.width),
+          height: String(pkg.height),
+          distance_unit: pkg.dimension_unit,
+          weight: String(pkg.weight),
+          mass_unit: pkg.weight_unit,
         },
       ],
-      ...(shipDate ? { ship_date: `${shipDate}T09:00:00+00:00` } : {}),
+      ...(shipDate ? { shipment_date: `${shipDate}T12:00:00Z` } : {}),
     });
 
     const settings = await getSettings();
@@ -80,19 +118,19 @@ export async function POST(req: Request) {
     const request: ShipmentRequest = { from, to, package: pkg, ...(shipDate ? { shipDate } : {}) };
     const id = draftId(request);
 
-    const quotes: Quote[] = ssRates
-      .filter((r) => typeof r.rate === "number" && r.rate > 0 && r.rate_id)
+    const quotes: Quote[] = (shipment.rates ?? [])
+      .filter((r) => r.object_id && Number(r.amount) > 0)
       .map((r) => ({
-        rateId: r.rate_id,
+        rateId: r.object_id,
         draftId: id,
-        carrierCode: r.carrier,
-        serviceName: serviceLabel(r.service || r.service_type),
-        serviceLevel: r.service_type,
-        deliveryDays: r.delivery_days != null && r.delivery_days !== "" ? String(r.delivery_days) : null,
-        currency: "USD",
-        cost: r.rate as number,
+        carrierCode: r.provider,
+        serviceName: serviceLabel(r.provider, r.servicelevel?.name),
+        serviceLevel: r.servicelevel?.token ?? "",
+        deliveryDays: r.estimated_days != null ? String(r.estimated_days) : null,
+        currency: r.currency || "USD",
+        cost: Number(r.amount),
         recipient: `${to.first_name} ${to.last_name}, ${to.city} ${to.state}`,
-        price: applyMargin(r.rate as number, settings),
+        price: applyMargin(Number(r.amount), settings),
         marginPercent: settings.percent,
         flatFee: settings.flatFee,
         createdAt,
@@ -106,6 +144,7 @@ export async function POST(req: Request) {
       updatedAt: createdAt,
       rateCount: quotes.length,
       lowestPrice: quotes.length ? Math.min(...quotes.map((q) => q.price)) : null,
+      carrierNotes: carrierNotes(shipment.messages ?? []),
       currency: "USD",
     };
     await saveDraftWithQuotes(draft, quotes);
@@ -123,8 +162,8 @@ export async function POST(req: Request) {
       }))
       .sort((a, b) => a.price - b.price);
 
-    // v1 doesn't report per-carrier failures; the field stays for the UI.
-    return NextResponse.json({ rates, carrierErrors: [] });
+    // Notes about carriers that couldn't quote are saved with the draft and shown in /admin only.
+    return NextResponse.json({ rates });
   } catch (err) {
     return errorResponse(err);
   }

@@ -1,13 +1,16 @@
 import { NextResponse } from "next/server";
 import { listDrafts, listShipments } from "@/lib/db";
 import { errorResponse } from "@/lib/http";
+import { requireAdmin } from "@/lib/session";
 
 export const runtime = "nodejs";
 
 const RECENT_BOOKINGS = 20;
 
 /** Drafts from the last 24 hours and recent bookings, for refilling the shipment form. Admin only (middleware). */
-export async function GET() {
+export async function GET(req: Request) {
+  const auth = await requireAdmin(req);
+  if ("response" in auth) return auth.response;
   try {
     const [drafts, shipments] = await Promise.all([listDrafts(), listShipments()]);
     const bookings = shipments.slice(0, RECENT_BOOKINGS).map((s) => ({
