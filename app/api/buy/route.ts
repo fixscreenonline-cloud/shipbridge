@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 import { BuyRequestSchema } from "@/lib/validation";
 import { buyLabel, CarrierApiError, type ShippoTransaction } from "@/lib/shippo";
+import { customerShippoKey, usageThisMonth } from "@/lib/customers";
 import { addShipment, claimQuote, getDraft, releaseQuote } from "@/lib/db";
 import { round2 } from "@/lib/pricing";
 import { errorResponse } from "@/lib/http";
-import type { Address, Draft, Quote, ShipmentDetails, ShipmentParty } from "@/lib/types";
-import { requireUser } from "@/lib/session";
+import { ownerOf, type Address, type Draft, type Quote, type ShipmentDetails, type ShipmentParty } from "@/lib/types";
+import { requireCustomer } from "@/lib/session";
 import { BodyError, readJson, safeHttpUrl } from "@/lib/request";
 
 export const runtime = "nodejs";
@@ -48,8 +49,9 @@ function details(tx: ShippoTransaction, quote: Quote, draft: Draft | null): Ship
 }
 
 export async function POST(req: Request) {
-  const auth = await requireUser(req); // booking login or admin
+  const auth = await requireCustomer(req); // customers only; the admin doesn't book
   if ("response" in auth) return auth.response;
+  const { actor } = auth;
   let raw: unknown;
   try {
     raw = await readJson(req, 2 * 1024);
@@ -65,11 +67,40 @@ export async function POST(req: Request) {
   if ("error" in claim) return NextResponse.json({ error: claim.error }, { status: claim.status });
   const { quote } = claim;
 
+  // A quote can only be bought by whoever fetched it (customers never see each other's rates).
+  if (ownerOf(quote) !== actor.ownerId) {
+    await releaseQuote(rateId);
+    return NextResponse.json({ error: "This rate is no longer available. Get rates again." }, { status: 404 });
+  }
+
+  // Monthly limits set by the admin for this customer.
+  if (actor.user) {
+    const { monthlyLabelLimit, monthlySpendLimit } = actor.user.settings;
+    if (monthlyLabelLimit !== null || monthlySpendLimit !== null) {
+      const used = await usageThisMonth(actor.ownerId);
+      const overLabels = monthlyLabelLimit !== null && used.labels + 1 > monthlyLabelLimit;
+      const overSpend = monthlySpendLimit !== null && used.spend + quote.price > monthlySpendLimit;
+      if (overLabels || overSpend) {
+        await releaseQuote(rateId);
+        return NextResponse.json(
+          {
+            error: overLabels
+              ? `Monthly label limit reached (${monthlyLabelLimit}). Contact your provider to raise it.`
+              : `This label would go over your monthly spending limit ($${monthlySpendLimit}). Contact your provider.`,
+            code: "limit_reached",
+          },
+          { status: 403 },
+        );
+      }
+    }
+  }
+  const shippoKey = customerShippoKey(actor.user);
+
   // TODO (before opening to customers): charge the customer `quote.price` here
   // (e.g. Stripe PaymentIntent) and only continue once payment succeeds.
 
   try {
-    const tx = await buyLabel(rateId);
+    const tx = await buyLabel(shippoKey, rateId, actor.user.settings.labelFileType);
     // The draft holds the form inputs; keep them with the booking so it can be re-quoted later.
     const draft = quote.draftId ? await getDraft(quote.draftId).catch(() => null) : null;
 
@@ -77,6 +108,8 @@ export async function POST(req: Request) {
     const cost = quote.cost;
     const record = {
       id: crypto.randomUUID(),
+      ownerId: actor.ownerId,
+      ownerName: actor.user.company || actor.user.name || actor.user.username,
       createdAt: new Date().toISOString(),
       rateId,
       shipmentNo: tx.object_id,

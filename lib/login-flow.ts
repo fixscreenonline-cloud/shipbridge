@@ -2,7 +2,9 @@ import "server-only";
 import { NextResponse } from "next/server";
 import { DEVICE_COOKIE, DEVICE_COOKIE_MAX_AGE, deviceId, guardKeys, lockedUntil, recordFailure, recordSuccess } from "./login-guard";
 import { errorResponse } from "./http";
-import { getSecurity, updateSecurity, type Role } from "./db";
+import { getSecurity, getUserByUsername, updateSecurity, type Role } from "./db";
+import { ensureLegacyBookingUser } from "./customers";
+import type { CustomerUser } from "./types";
 import { endSession, startSession } from "./session";
 import { BodyError, rateLimit, readJson } from "./request";
 import { decryptSecret, verifyCode } from "./totp";
@@ -13,18 +15,8 @@ const norm = (s: string) => s.trim().toLowerCase();
 
 export const adminUsername = () => process.env.ADMIN_USERNAME?.trim() || "admin";
 
-/** Where the booking login comes from: Admin → Security (stored hashed), else BOOKING_* env vars. */
-export async function bookingLogin(): Promise<{ username: string; check: (pw: string) => Promise<boolean>; source: "admin" | "env" } | null> {
-  const s = await getSecurity();
-  if (s.bookingUsername && s.bookingPasswordHash) {
-    const hash = s.bookingPasswordHash;
-    return { username: s.bookingUsername, check: (pw) => verifyPassword(pw, hash), source: "admin" };
-  }
-  const u = process.env.BOOKING_USERNAME?.trim();
-  const p = process.env.BOOKING_PASSWORD;
-  if (u && p) return { username: u, check: async (pw) => equalsConstantTime(pw, p), source: "env" };
-  return null;
-}
+// A valid scrypt hash of a random string: verifying against it costs the same as a real check.
+const DUMMY_HASH = "scrypt$AAAAAAAAAAAAAAAAAAAAAA$" + "A".repeat(86);
 
 function lockedResponse(until: Date) {
   const retryAfter = Math.max(1, Math.ceil((until.getTime() - Date.now()) / 1000));
@@ -93,22 +85,25 @@ export async function handleLogin(req: Request, role: Role) {
     // Check username and password together (both always evaluated) so the reply doesn't reveal which was wrong.
     let ok: boolean;
     let canonicalName: string;
+    let customer: CustomerUser | null = null;
     if (role === "admin") {
       canonicalName = adminUsername();
       const userOk = equalsConstantTime(norm(username), norm(canonicalName));
       const passOk = equalsConstantTime(password, process.env.ADMIN_PASSWORD!);
       ok = userOk && passOk;
     } else {
-      const login = await bookingLogin();
-      if (!login) {
-        return NextResponse.json({ error: "Booking sign-in isn't set up yet. Ask the admin to set it in Admin → Security." }, { status: 503 });
-      }
-      canonicalName = login.username;
-      const userOk = equalsConstantTime(norm(username), norm(login.username));
-      const passOk = await login.check(password);
-      ok = userOk && passOk;
+      // Customer accounts (Admin → Users). The old single booking login is moved over on first use.
+      await ensureLegacyBookingUser();
+      customer = await getUserByUsername(username);
+      canonicalName = customer?.username ?? username;
+      // Always run the hash check (against a dummy when the user doesn't exist) so timing doesn't reveal usernames.
+      const passOk = await verifyPassword(password, customer?.passwordHash ?? DUMMY_HASH);
+      ok = !!customer && passOk;
     }
     if (!ok) return fail("username or password");
+    if (customer && !customer.active) {
+      return withDevice(NextResponse.json({ error: "This account is switched off. Contact your provider." }, { status: 403 }));
+    }
 
     // Admin two-factor sign-in, when turned on (Admin → Security). ADMIN_2FA_RESET=true skips it for recovery.
     if (role === "admin") {
@@ -131,7 +126,7 @@ export async function handleLogin(req: Request, role: Role) {
     await recordSuccess(keys);
     const res = NextResponse.json({ ok: true, role });
     await endSession(res, req); // a fresh session id every sign-in; the old one stops working
-    await startSession(res, req, role, canonicalName);
+    await startSession(res, req, role, canonicalName, customer?.id);
     return withDevice(res);
   } catch (err) {
     return errorResponse(err);

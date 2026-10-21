@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
 import QRCode from "qrcode";
 import { z } from "zod";
-import { clearAllLoginAttempts, deleteOtherSessions, deleteSession, deleteSessionsByRole, getSecurity, updateSecurity } from "@/lib/db";
-import { hashPassword } from "@/lib/passwords";
+import { clearAllLoginAttempts, deleteOtherSessions, deleteSession, getSecurity, updateSecurity } from "@/lib/db";
 import { errorResponse } from "@/lib/http";
 import { requireAdmin } from "@/lib/session";
 import { deviceId, guardKeys, lockedUntil, recordFailure } from "@/lib/login-guard";
@@ -18,16 +17,6 @@ const Body = z.discriminatedUnion("action", [
   z.object({ action: z.literal("sign-out-session"), id: z.string().max(64) }),
   z.object({ action: z.literal("sign-out-others") }),
   z.object({ action: z.literal("clear-lockouts") }),
-  z.object({
-    action: z.literal("set-booking-login"),
-    username: z
-      .string()
-      .trim()
-      .min(3, "Username needs at least 3 characters")
-      .max(64, "Username is too long")
-      .regex(/^[A-Za-z0-9._@-]+$/, "Use letters, digits and . _ @ - only"),
-    password: z.string().min(8, "Password needs at least 8 characters").max(256, "Password is too long"),
-  }),
 ]);
 
 const bad = (error: string, status = 400) => NextResponse.json({ error }, { status });
@@ -44,9 +33,7 @@ export async function POST(req: Request) {
   }
   const parsed = Body.safeParse(raw);
   if (!parsed.success) {
-    // Field problems (e.g. a short password) are worth showing; anything else is just a bad request.
-    const isBookingForm = (raw as { action?: unknown } | null)?.action === "set-booking-login";
-    return bad(isBookingForm ? (parsed.error.issues[0]?.message ?? "Check the fields.") : "Unknown action.");
+    return bad("Unknown action.");
   }
   const body = parsed.data;
 
@@ -115,16 +102,6 @@ export async function POST(req: Request) {
       }
       case "clear-lockouts": {
         await clearAllLoginAttempts();
-        return NextResponse.json({ ok: true });
-      }
-      case "set-booking-login": {
-        // Stored as a salted scrypt hash; everyone signed in with the old booking login is signed out.
-        await updateSecurity({
-          bookingUsername: body.username,
-          bookingPasswordHash: await hashPassword(body.password),
-          bookingUpdatedAt: new Date().toISOString(),
-        });
-        await deleteSessionsByRole("user");
         return NextResponse.json({ ok: true });
       }
     }

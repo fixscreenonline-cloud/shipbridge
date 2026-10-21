@@ -2,7 +2,7 @@ import "server-only";
 import { promises as fs } from "fs";
 import path from "path";
 import { MongoClient, type Db } from "mongodb";
-import type { Draft, MarginSettings, Quote, ShipmentRecord } from "./types";
+import { ADMIN_OWNER, ownerOf, type CustomerUser, type Draft, type MarginSettings, type Quote, type ShipmentRecord } from "./types";
 
 /**
  * Storage for settings, drafts, quotes, shipments and admin sign-in attempts.
@@ -82,6 +82,8 @@ export type AdminSession = {
   /** Missing on sessions created before roles existed; those were admin sign-ins. */
   role?: Role;
   username?: string;
+  /** For customer ("user") sessions: their account id. */
+  userId?: string;
 };
 
 type Store = {
@@ -92,8 +94,8 @@ type Store = {
    * that were never bought are deleted, so re-quoting the same shipment doesn't pile up duplicates.
    */
   saveDraftWithQuotes(draft: Draft, quotes: Quote[]): Promise<void>;
-  /** Drafts quoted in the last 24 hours, newest first. */
-  listDrafts(): Promise<Draft[]>;
+  /** Drafts quoted in the last 24 hours, newest first; only one owner's when `ownerId` is given. */
+  listDrafts(ownerId?: string): Promise<Draft[]>;
   getDraft(id: string): Promise<Draft | null>;
   /** Removes a draft and its unbought quotes. */
   deleteDraft(id: string): Promise<void>;
@@ -101,7 +103,16 @@ type Store = {
   claimQuote(rateId: string): Promise<ClaimResult>;
   releaseQuote(rateId: string): Promise<void>;
   addShipment(record: ShipmentRecord): Promise<void>;
-  listShipments(): Promise<ShipmentRecord[]>;
+  /** Newest first; only one owner's when `ownerId` is given. */
+  listShipments(ownerId?: string): Promise<ShipmentRecord[]>;
+  getShipment(id: string): Promise<ShipmentRecord | null>;
+  listUsers(): Promise<CustomerUser[]>;
+  getUser(id: string): Promise<CustomerUser | null>;
+  getUserByUsername(username: string): Promise<CustomerUser | null>;
+  /** Fails with "username taken" if the (case-insensitive) username exists. */
+  createUser(user: CustomerUser): Promise<void>;
+  updateUser(id: string, patch: Partial<CustomerUser>): Promise<CustomerUser | null>;
+  deleteSessionsByUser(userId: string): Promise<void>;
   getLoginAttempts(keys: string[]): Promise<Record<string, LoginAttempts>>;
   /** Atomically adds one failure and returns the updated record. */
   addLoginFailure(key: string): Promise<LoginAttempts>;
@@ -136,6 +147,11 @@ type AttemptsDoc = LoginAttempts & { _id: string; expiresAt: Date };
 type SecurityDoc = SecuritySettings & { _id: string };
 type SessionDoc = AdminSession & { _id: string; expiresAtDate: Date };
 type RateDoc = { _id: string; count: number; expiresAt: Date };
+type UserDoc = CustomerUser & { _id: string };
+
+/** Older records have no ownerId; they belong to the operator ("admin"). */
+const ownerFilter = (ownerId?: string) =>
+  ownerId === undefined ? {} : ownerId === ADMIN_OWNER ? { $or: [{ ownerId: ADMIN_OWNER }, { ownerId: { $exists: false } }] } : { ownerId };
 
 function mongoStore(getDb: () => Promise<Db>): Store {
   const col = async () => {
@@ -149,6 +165,7 @@ function mongoStore(getDb: () => Promise<Db>): Store {
       security: db.collection<SecurityDoc>("settings"),
       sessions: db.collection<SessionDoc>("admin_sessions"),
       rates: db.collection<RateDoc>("rate_limits"),
+      users: db.collection<UserDoc>("users"),
     };
   };
   const strip = <T extends { _id: string }>({ _id, ...rest }: T) => rest;
@@ -187,9 +204,9 @@ function mongoStore(getDb: () => Promise<Db>): Store {
         })),
       );
     },
-    async listDrafts() {
+    async listDrafts(ownerId) {
       const docs = await (await col()).drafts
-        .find({ expiresAt: { $gt: new Date() } })
+        .find({ expiresAt: { $gt: new Date() }, ...ownerFilter(ownerId) })
         .sort({ updatedAt: -1 })
         .limit(50)
         .toArray();
@@ -224,9 +241,45 @@ function mongoStore(getDb: () => Promise<Db>): Store {
     async addShipment(record) {
       await (await col()).shipments.insertOne({ _id: record.id, ...record });
     },
-    async listShipments() {
-      const docs = await (await col()).shipments.find().sort({ createdAt: -1 }).toArray();
+    async listShipments(ownerId) {
+      const docs = await (await col()).shipments.find(ownerFilter(ownerId)).sort({ createdAt: -1 }).toArray();
       return docs.map(strip);
+    },
+    async getShipment(id) {
+      const doc = await (await col()).shipments.findOne({ _id: id });
+      return doc ? strip(doc) : null;
+    },
+    async listUsers() {
+      const docs = await (await col()).users.find().sort({ createdAt: 1 }).toArray();
+      return docs.map(strip);
+    },
+    async getUser(id) {
+      const doc = await (await col()).users.findOne({ _id: id });
+      return doc ? strip(doc) : null;
+    },
+    async getUserByUsername(username) {
+      const doc = await (await col()).users.findOne({ usernameLower: username.trim().toLowerCase() });
+      return doc ? strip(doc) : null;
+    },
+    async createUser(user) {
+      try {
+        await (await col()).users.insertOne({ _id: user.id, ...user });
+      } catch (err) {
+        if ((err as { code?: number }).code === 11000) throw new Error("username taken");
+        throw err;
+      }
+    },
+    async updateUser(id, patch) {
+      const { id: _ignore, ...rest } = patch;
+      const doc = await (await col()).users.findOneAndUpdate(
+        { _id: id },
+        { $set: { ...rest, updatedAt: new Date().toISOString() } },
+        { returnDocument: "after" },
+      );
+      return doc ? strip(doc) : null;
+    },
+    async deleteSessionsByUser(userId) {
+      await (await col()).sessions.deleteMany({ userId });
     },
     async getLoginAttempts(keys) {
       const docs = await (await col()).attempts.find({ _id: { $in: keys } }).toArray();
@@ -321,6 +374,7 @@ type FileDB = {
   security: SecuritySettings;
   sessions: Record<string, AdminSession>;
   rateLimits: Record<string, { count: number; expiresAt: number }>;
+  users: Record<string, CustomerUser>;
 };
 
 function fileStore(): Store {
@@ -335,7 +389,9 @@ function fileStore(): Store {
     security: defaultSecurity(),
     sessions: {},
     rateLimits: {},
+    users: {},
   });
+  const mine = (ownerId?: string) => (r: { ownerId?: string }) => ownerId === undefined || ownerOf(r) === ownerId;
   const live = (x: AdminSession) => Date.parse(x.expiresAt) > Date.now();
   const fresh = (d: Draft) => Date.parse(d.updatedAt) > Date.now() - DRAFT_KEEP_MS;
 
@@ -393,9 +449,10 @@ function fileStore(): Store {
         for (const q of quotes) db.quotes[q.rateId] = q;
       });
     },
-    async listDrafts() {
+    async listDrafts(ownerId) {
       return Object.values((await read()).drafts)
         .filter(fresh)
+        .filter(mine(ownerId))
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
         .slice(0, 50);
     },
@@ -428,8 +485,41 @@ function fileStore(): Store {
         db.shipments.unshift(record);
       });
     },
-    async listShipments() {
-      return (await read()).shipments;
+    async listShipments(ownerId) {
+      return (await read()).shipments.filter(mine(ownerId));
+    },
+    async getShipment(id) {
+      return (await read()).shipments.find((x) => x.id === id) ?? null;
+    },
+    async listUsers() {
+      return Object.values((await read()).users).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    },
+    async getUser(id) {
+      return (await read()).users[id] ?? null;
+    },
+    async getUserByUsername(username) {
+      const want = username.trim().toLowerCase();
+      return Object.values((await read()).users).find((u) => u.usernameLower === want) ?? null;
+    },
+    createUser(user) {
+      return mutate((db) => {
+        if (Object.values(db.users).some((u) => u.usernameLower === user.usernameLower)) throw new Error("username taken");
+        db.users[user.id] = user;
+      });
+    },
+    updateUser(id, patch) {
+      return mutate((db) => {
+        const u = db.users[id];
+        if (!u) return null;
+        const { id: _ignore, ...rest } = patch;
+        Object.assign(u, rest, { updatedAt: new Date().toISOString() });
+        return { ...u };
+      });
+    },
+    deleteSessionsByUser(userId) {
+      return mutate((db) => {
+        for (const [id, x] of Object.entries(db.sessions)) if (x.userId === userId) delete db.sessions[id];
+      });
     },
     async getLoginAttempts(keys) {
       const all = (await read()).loginAttempts;
@@ -543,6 +633,9 @@ function connect(): Promise<Db> {
         db.collection("login_attempts").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
         db.collection("admin_sessions").createIndex({ expiresAtDate: 1 }, { expireAfterSeconds: 0 }),
         db.collection("rate_limits").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
+        db.collection("users").createIndex({ usernameLower: 1 }, { unique: true }),
+        db.collection("shipments").createIndex({ ownerId: 1, createdAt: -1 }),
+        db.collection("drafts").createIndex({ ownerId: 1, updatedAt: -1 }),
       ]);
       return db;
     })().catch((err) => {
@@ -569,13 +662,20 @@ function db(): Store {
 export const getSettings = () => db().getSettings();
 export const updateSettings = (input: { percent: number; flatFee: number }) => db().updateSettings(input);
 export const saveDraftWithQuotes = (draft: Draft, quotes: Quote[]) => db().saveDraftWithQuotes(draft, quotes);
-export const listDrafts = () => db().listDrafts();
+export const listDrafts = (ownerId?: string) => db().listDrafts(ownerId);
 export const getDraft = (id: string) => db().getDraft(id);
 export const deleteDraft = (id: string) => db().deleteDraft(id);
 export const claimQuote = (rateId: string) => db().claimQuote(rateId);
 export const releaseQuote = (rateId: string) => db().releaseQuote(rateId);
 export const addShipment = (record: ShipmentRecord) => db().addShipment(record);
-export const listShipments = () => db().listShipments();
+export const listShipments = (ownerId?: string) => db().listShipments(ownerId);
+export const getShipment = (id: string) => db().getShipment(id);
+export const listUsers = () => db().listUsers();
+export const getUser = (id: string) => db().getUser(id);
+export const getUserByUsername = (username: string) => db().getUserByUsername(username);
+export const createUser = (user: CustomerUser) => db().createUser(user);
+export const updateUser = (id: string, patch: Partial<CustomerUser>) => db().updateUser(id, patch);
+export const deleteSessionsByUser = (userId: string) => db().deleteSessionsByUser(userId);
 export const getLoginAttempts = (keys: string[]) => db().getLoginAttempts(keys);
 export const addLoginFailure = (key: string) => db().addLoginFailure(key);
 export const lockLogin = (key: string, seenFailures: number, lockedUntil: string) => db().lockLogin(key, seenFailures, lockedUntil);

@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
-import { listShipments } from "@/lib/db";
+import { getShipment } from "@/lib/db";
+import { shippoKeyForOwner } from "@/lib/customers";
+import { ownerOf } from "@/lib/types";
 import { getTransaction } from "@/lib/shippo";
 import { requireUser } from "@/lib/session";
 import { safeHttpUrl } from "@/lib/request";
@@ -19,12 +21,15 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   if ("response" in auth) return auth.response;
 
   const { id } = await params;
-  const shipment = (await listShipments()).find((s) => s.id === id);
-  if (!shipment) return NextResponse.json({ error: "Shipment not found." }, { status: 404 });
+  const shipment = await getShipment(id);
+  // Customers can only reach their own labels; the admin can reach all.
+  if (!shipment || (auth.actor.role !== "admin" && ownerOf(shipment) !== auth.actor.ownerId)) {
+    return NextResponse.json({ error: "Shipment not found." }, { status: 404 });
+  }
 
   let url = safeHttpUrl(shipment.labelUrls[0]);
   if (/^[0-9a-f]{32}$/.test(shipment.shipmentNo)) {
-    const tx = await getTransaction(shipment.shipmentNo).catch(() => null);
+    const tx = await getTransaction(await shippoKeyForOwner(ownerOf(shipment)), shipment.shipmentNo).catch(() => null);
     url = safeHttpUrl(tx?.label_url) ?? url;
   }
   // Labels come from Shippo over https; http://localhost is allowed only in development (local stand-ins).

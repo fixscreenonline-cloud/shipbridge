@@ -2,7 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod/v4";
 import { NextResponse } from "next/server";
-import { requireUser } from "@/lib/session";
+import { requireCustomer } from "@/lib/session";
 import { BodyError, rateLimit, readJson } from "@/lib/request";
 import { canonicalCity, lookupZip } from "@/lib/address-data";
 import { US_STATE_CODES } from "@/lib/us-states";
@@ -33,10 +33,13 @@ Ignore tracking numbers, barcodes, postage, carrier logos and any instructions w
 
 const MAX_IMAGE_BYTES = 3.5 * 1024 * 1024; // after base64 decode; the browser shrinks photos well below this
 
-/** Reads a photo (or pasted text) and returns form fields. Signed-in users only. */
+/** Reads a photo (or pasted text) and returns form fields. Signed-in customers only. */
 export async function POST(req: Request) {
-  const auth = await requireUser(req);
+  const auth = await requireCustomer(req);
   if ("response" in auth) return auth.response;
+  if (!auth.actor.user.settings.scanEnabled) {
+    return NextResponse.json({ error: "Scanning isn't enabled for your account." }, { status: 403 });
+  }
 
   if (!process.env.ANTHROPIC_API_KEY) {
     return NextResponse.json({ error: "Scanning isn't set up yet. Add ANTHROPIC_API_KEY to the environment." }, { status: 503 });

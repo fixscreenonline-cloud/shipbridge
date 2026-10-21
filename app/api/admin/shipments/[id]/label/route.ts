@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
-import { listShipments } from "@/lib/db";
+import { getShipment } from "@/lib/db";
+import { shippoKeyForOwner } from "@/lib/customers";
+import { ownerOf } from "@/lib/types";
 import { getTransaction } from "@/lib/shippo";
 import { errorResponse } from "@/lib/http";
 import { safeHttpUrl } from "@/lib/request";
@@ -16,12 +18,12 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   if ("response" in auth) return auth.response;
   try {
     const { id } = await params;
-    const shipment = (await listShipments()).find((s) => s.id === id);
+    const shipment = await getShipment(id);
     if (!shipment) return NextResponse.json({ error: "Shipment not found." }, { status: 404 });
 
     let url = safeHttpUrl(shipment.labelUrls[0]);
     if (/^[0-9a-f]{32}$/.test(shipment.shipmentNo)) {
-      const tx = await getTransaction(shipment.shipmentNo).catch(() => null);
+      const tx = await getTransaction(await shippoKeyForOwner(ownerOf(shipment)), shipment.shipmentNo).catch(() => null);
       if (safeHttpUrl(tx?.label_url)) url = safeHttpUrl(tx?.label_url);
     }
     if (!url) return NextResponse.json({ error: "This shipment has no label." }, { status: 404 });

@@ -41,5 +41,5 @@ export async function middleware(req: NextRequest) {
 
 export const config = {
   // "/" isn't listed: it shows the booking sign-in screen itself when signed out.
-  matcher: ["/admin/:path*", "/api/admin/:path*", "/api/buy", "/api/rates", "/api/login", "/api/scan-address", "/api/label/:path*"],
+  matcher: ["/admin/:path*", "/api/admin/:path*", "/api/buy", "/api/rates", "/api/login", "/api/scan-address", "/api/label/:path*", "/api/me/:path*"],
 };

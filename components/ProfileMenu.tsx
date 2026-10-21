@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { Avatar, Dropdown, DropdownItem, DropdownMenu, DropdownSection, DropdownTrigger } from "@heroui/react";
-import { GridIcon, LogoutIcon, PlusIcon } from "./icons";
+import { GearIcon, GridIcon, LogoutIcon, PlusIcon, ReceiptIcon } from "./icons";
 
 /** Header profile button: avatar + name; the menu shows the role and the account actions. */
 export function ProfileMenu({ username, isAdmin }: { username: string; isAdmin: boolean }) {
@@ -36,25 +36,36 @@ export function ProfileMenu({ username, isAdmin }: { username: string; isAdmin: 
         onAction={(key) => {
           if (key === "signout") signOut();
           else if (key === "admin") router.push("/admin");
-          else if (key === "ship") router.push(isAdmin ? "/admin/ship" : "/");
+          else if (key === "ship") router.push("/");
+          else if (key === "orders") router.push("/orders");
+          else if (key === "settings") router.push("/settings");
         }}
       >
         <DropdownSection showDivider aria-label="Profile">
           <DropdownItem key="profile" isReadOnly className="cursor-default opacity-100" textValue={username}>
             <p className="font-semibold">{username}</p>
-            <p className="text-xs text-steel">{isAdmin ? "Admin" : "Booking"}</p>
+            <p className="text-xs text-steel">{isAdmin ? "Admin" : "Customer"}</p>
           </DropdownItem>
         </DropdownSection>
-        <DropdownSection showDivider aria-label="Go to">
-          <DropdownItem key="ship" startContent={<PlusIcon />}>
-            New shipment
-          </DropdownItem>
-          {isAdmin ? (
+        {isAdmin ? (
+          <DropdownSection showDivider aria-label="Go to">
             <DropdownItem key="admin" startContent={<GridIcon />}>
               Admin dashboard
             </DropdownItem>
-          ) : null}
-        </DropdownSection>
+          </DropdownSection>
+        ) : (
+          <DropdownSection showDivider aria-label="Go to">
+            <DropdownItem key="ship" startContent={<PlusIcon />}>
+              New shipment
+            </DropdownItem>
+            <DropdownItem key="orders" startContent={<ReceiptIcon />}>
+              My orders
+            </DropdownItem>
+            <DropdownItem key="settings" startContent={<GearIcon />}>
+              Settings
+            </DropdownItem>
+          </DropdownSection>
+        )}
         <DropdownSection aria-label="Session">
           <DropdownItem key="signout" color="danger" className="text-danger" startContent={<LogoutIcon />}>
             Sign out

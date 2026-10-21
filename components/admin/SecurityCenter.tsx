@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import NextLink from "next/link";
 import { Button, Chip, Input, addToast } from "@heroui/react";
 import { CheckIcon, AlertIcon } from "../icons";
 
@@ -50,10 +51,8 @@ export function SecurityCenter({
   sessions,
   lockouts,
   checks,
-  booking,
   adminUsername,
 }: {
-  booking: { username: string | null; source: "admin" | "env" | null; updatedAt: string | null };
   adminUsername: string;
   twoFactorOn: boolean;
   twoFactorSince: string | null;
@@ -65,12 +64,6 @@ export function SecurityCenter({
   const router = useRouter();
   const [setup, setSetup] = useState<{ qrSvg: string; secret: string } | null>(null);
   const [code, setCode] = useState("");
-  const [bUser, setBUser] = useState(booking.username ?? "");
-  const [bPass, setBPass] = useState("");
-  const [bPass2, setBPass2] = useState("");
-  const weak =
-    bPass.length > 0 &&
-    (bPass.length < 12 || (bUser && bPass.toLowerCase().includes(bUser.toLowerCase())) || /^[A-Za-z]+[@#!]?\d{1,4}$/.test(bPass));
   const [busy, setBusy] = useState<string | null>(null);
   const [mounted, setMounted] = useState(false); // dates use the viewer's time zone
   useEffect(() => setMounted(true), []);
@@ -123,84 +116,19 @@ export function SecurityCenter({
         </ul>
       </Card>
 
-      <Card
-        title="Booking login"
-        subtitle="The username and password used on the home screen to get rates and book labels. It can't open admin."
-        action={
-          booking.username ? (
-            <Chip variant="flat" color="success">
-              {booking.username}
-              {booking.source === "env" ? " · from environment" : ""}
-            </Chip>
-          ) : (
-            <Chip variant="flat" color="warning">Not set</Chip>
-          )
-        }
-      >
-        <form
-          className="grid gap-3 sm:grid-cols-3"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (bPass !== bPass2) return addToast({ title: "Passwords don't match", color: "danger" });
-            run("booking", { action: "set-booking-login", username: bUser, password: bPass }, "Booking login updated", () => {
-              setBPass("");
-              setBPass2("");
-            });
-          }}
-        >
-          <Input
-            label="Username"
-            variant="bordered"
-            size="sm"
-            autoComplete="off"
-            maxLength={64}
-            value={bUser}
-            onValueChange={setBUser}
-          />
-          <Input
-            label="New password"
-            type="password"
-            variant="bordered"
-            size="sm"
-            autoComplete="new-password"
-            maxLength={256}
-            value={bPass}
-            onValueChange={setBPass}
-          />
-          <Input
-            label="Confirm password"
-            type="password"
-            variant="bordered"
-            size="sm"
-            autoComplete="new-password"
-            maxLength={256}
-            value={bPass2}
-            onValueChange={setBPass2}
-            isInvalid={bPass2.length > 0 && bPass2 !== bPass}
-            errorMessage="Doesn't match"
-          />
-          <div className="flex flex-wrap items-center justify-between gap-3 sm:col-span-3">
-            <p className={`text-xs ${weak ? "text-warning-700" : "text-steel"}`}>
-              {weak
-                ? "This password is easy to guess (short, or based on the name). Use 12+ characters, e.g. three random words."
-                : "Saving signs out everyone using the old booking login. Stored only as a secure hash."}
-            </p>
-            <Button
-              type="submit"
-              color="primary"
-              size="sm"
-              className="font-semibold"
-              isDisabled={bUser.trim().length < 3 || bPass.length < 8 || bPass !== bPass2}
-              isLoading={busy === "booking"}
-            >
-              Save booking login
-            </Button>
-          </div>
-        </form>
-        <p className="mt-4 border-t border-ink/10 pt-3 text-xs text-steel">
-          Admin sign-in uses username <strong className="text-foreground">{adminUsername}</strong> and ADMIN_PASSWORD (both set in the
-          environment, plus 2FA when on).
-        </p>
+      <Card title="Sign-ins" subtitle="Who can sign in, and where.">
+        <ul className="space-y-2 text-sm">
+          <li>
+            <strong>Admin</strong> (here, /admin/login): username <strong>{adminUsername}</strong> with ADMIN_PASSWORD from the
+            environment, plus two-factor when on.
+          </li>
+          <li>
+            <strong>Customers</strong> (home screen): each has their own login, settings and Shippo key.{" "}
+            <NextLink href="/admin/users" className="font-medium underline">
+              Manage in Users
+            </NextLink>
+          </li>
+        </ul>
       </Card>
 
       <Card
@@ -332,7 +260,7 @@ export function SecurityCenter({
                 <div className="flex items-center gap-2 text-sm font-medium">
                   {deviceName(s.userAgent)}
                   <Chip size="sm" variant="flat" color={s.role === "admin" ? "primary" : "default"} className="h-5">
-                    {s.role === "admin" ? "Admin" : "Booking"} · {s.username}
+                    {s.role === "admin" ? "Admin" : "Customer"} · {s.username}
                   </Chip>
                   {s.current && (
                     <Chip size="sm" color="success" variant="flat" className="h-5">

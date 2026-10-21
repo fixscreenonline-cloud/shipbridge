@@ -1,7 +1,8 @@
 # ShipBridge
 
-Next.js 15 + HeroUI app that gets carrier rates from **[Shippo](https://docs.goshippo.com/)**, adds your
-profit margin, and buys labels. An admin page lets you change the margin and see profit per label.
+Next.js 15 + HeroUI app, sold as a service: each customer signs in, gets carrier rates from
+**[Shippo](https://docs.goshippo.com/)** on their own Shippo account, and buys labels; you add a fee
+per customer. The admin area manages customers and shows profit per customer. The admin doesn't book.
 
 ## How the money flows
 
@@ -16,9 +17,10 @@ Customer ──(sees marked-up price)──> ShipBridge ──(pays base price)�
 2. `POST /api/buy` looks up the stored quote by rate id (the browser can't change the price), buys
    the label with a Shippo **transaction** (`POST /transactions`), and records cost, charged amount
    and profit.
-3. `/admin` is the admin area: overview, new shipment, shipments, drafts, margin and carrier notes.
+3. `/admin` is the admin area: overview (profit by customer), users (each customer's fee, limits,
+   features and drafts), shipments, carrier notes and security.
 
-Customer price = `cost × (1 + margin%) + flat fee`, rounded **up** to the cent.
+Customer price = `cost × (1 + fee%) + flat fee`, rounded **up** to the cent (fee set per customer).
 
 > **Important:** Shippo bills *your* Shippo account the base price. ShipBridge records what you
 > should charge, but it does **not** collect payment from customers yet. To actually keep the
@@ -36,29 +38,34 @@ Open http://localhost:3000 for shipments and http://localhost:3000/admin for the
 
 | Variable | Purpose |
 | --- | --- |
-| `SHIPPO_API_TOKEN` | Shippo API key from https://portal.goshippo.com/api-config/api. Use a **test** key (`shippo_test_…`) first: rates are free and labels are samples. A live key (`shippo_live_…`) buys real labels. |
+| `SHIPPO_API_TOKEN` | Optional. Only reopens labels booked before customer accounts existed. Customers add their own key (`shippo_test_…` for free sample labels, `shippo_live_…` for real ones) in Settings. |
 | `SHIPPO_LABEL_FILE_TYPE` | Label format: `PDF_4x6` (default), `PDF`, `PDF_4x8`, `PDF_A4`, `PDF_A6`, `PNG`, `ZPLII`, … |
 | `ANTHROPIC_API_KEY` | Optional. Turns on **Scan / paste** (read an address from a photo or pasted text with Claude Opus 5.5, ~1-2¢ per scan). Empty = button hidden. |
 | `ADMIN_USERNAME`, `ADMIN_PASSWORD` | Admin sign-in (username defaults to `admin`). |
-| `BOOKING_USERNAME`, `BOOKING_PASSWORD` | Starting booking login for the home screen; replaced once you save one in Admin → Security. |
+| `BOOKING_USERNAME`, `BOOKING_PASSWORD` | Optional, one-time: if set, becomes the first customer account on first sign-in. After that, manage customers in Admin → Users. |
 | `ADMIN_SESSION_SECRET` | Random 32+ char string (`openssl rand -hex 32`). Signs the session cookie. |
-| `DEFAULT_MARGIN_PERCENT`, `DEFAULT_FLAT_FEE` | Used until you save a margin in /admin. |
 | `MONGODB_URI` | MongoDB connection string. **Required on Vercel.** Leave empty locally to use the JSON file. |
 | `MONGODB_DB` | Database name (default `shipbridge`). |
 | `DATA_DIR` | Folder for the JSON data file (only used when `MONGODB_URI` is empty). |
 
 ## Who can do what
 
-The whole site is private. There are two sign-ins:
+The whole site is private. You (the admin) sell access: each customer gets their own sign-in.
 
-| | Booking login | Admin login |
+| | Customer | Admin (you) |
 | --- | --- | --- |
-| Where | `/` (home screen) | `/admin/login` |
-| Credentials | Set in **Admin → Security → Booking login** (stored as a scrypt hash). Until then: `BOOKING_USERNAME` / `BOOKING_PASSWORD` | `ADMIN_USERNAME` / `ADMIN_PASSWORD` (+ 2FA when on) |
-| Can | Get rates and book labels | Everything: overview, shipments & profit, drafts, margin, carrier notes, security, booking |
+| Sign in at | `/` (home screen) | `/admin/login` |
+| Account | Created in **Admin → Users** (password stored as a scrypt hash) | `ADMIN_USERNAME` / `ADMIN_PASSWORD` (+ 2FA when on) |
+| Shippo key | Their own, added in **Settings** (checked with Shippo, stored AES-256-GCM encrypted, only the last 4 shown) | — |
+| Can | Get rates, book and reprint labels, **My orders** (track, print, ship again), change own password | Manage customers and see all bookings and profit. **Can't book**: `/api/rates`, `/api/buy` and `/api/scan-address` refuse admin sessions (`requireCustomer`). |
 
-Changing the booking login signs out everyone using the old one. Both sign-ins share the lockout
-and rate limits; APIs check the session's role (`requireUser` / `requireAdmin` in `lib/session.ts`).
+Per customer, the admin sets: fee (% + flat per label, added to their Shippo price; this is your
+profit), default sender address, monthly label/spend limits, allowed carriers, label format, photo /
+paste scanning, and on/off. Switching a customer off or resetting their password signs them out at
+once. Customers only see their own quotes, drafts, orders and labels (`ownerId` on every record).
+
+Both sign-ins share the lockout and rate limits; APIs check the session's role
+(`requireUser` / `requireAdmin` in `lib/session.ts`).
 
 ## Admin security
 
@@ -120,8 +127,8 @@ and rate limits; APIs check the session's role (`requireUser` / `requireAdmin` i
 
 **Drafts:** every price check saves its form inputs as a draft, keyed by a hash of the addresses and
 parcel, so quoting the same shipment again updates one draft and replaces its unbought quotes
-instead of piling up duplicates. Signed-in admins see drafts and recent bookings in a **Recent**
-panel on the shipment page and can refill the form from them.
+instead of piling up duplicates. Each draft belongs to the customer who made it; the admin sees
+(and can delete) a customer's drafts on their page in Admin → Users.
 
 ### MongoDB on Vercel
 
@@ -147,18 +154,20 @@ panel on the shipment page and can refill the form from them.
 
 ```
 app/
-  page.tsx                 New shipment (form + rates + buy)
+  page.tsx                 Customer: new shipment (form + rates + buy); admin is sent to /admin
+  orders/page.tsx          Customer: My orders (print, track, ship again)
+  settings/page.tsx        Customer: Shippo key, password
   admin/login/page.tsx     Admin sign in
   admin/(panel)/           Admin area (shared menu in layout.tsx):
-    page.tsx               Overview: profit, latest bookings, drafts
-    ship/page.tsx          New shipment (?draft=<id> or ?booking=<id> to prefill)
-    shipments/page.tsx     All bookings, details, CSV, Ship again
-    drafts/page.tsx        Price checks from the last 24 h
-    margin/page.tsx        Margin % and flat fee
+    page.tsx               Overview: profit by customer, latest bookings
+    users/page.tsx         Customers; users/[id] = fee, limits, features, drafts
+    shipments/page.tsx     All bookings by customer, details, CSV
     carriers/page.tsx      Why some carriers didn't quote
-  api/rates/route.ts       Get rates (Shippo shipment), apply margin, store draft + quotes
+    security/page.tsx      2FA, sessions, lockouts
+  api/rates/route.ts       Get rates (customer's Shippo key), apply their fee, store draft + quotes
   api/buy/route.ts         Buy label (Shippo transaction), record profit
-  api/admin/*              Login, logout, settings, shipments, drafts, recent, label link
+  api/me/*                 Customer: Shippo key, password
+  api/admin/*              Login, logout, users, shipments, drafts, security, label link
 components/                HeroUI client components
 lib/shippo.ts              Shippo client (API key + shipments/transactions)
 lib/pricing.ts             Margin math

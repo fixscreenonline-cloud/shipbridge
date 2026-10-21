@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import NextLink from "next/link";
 import { useRouter } from "next/navigation";
 import { Button, addToast } from "@heroui/react";
 import { ArrowRightIcon, BoxIcon } from "../icons";
@@ -10,6 +9,7 @@ import type { Draft } from "@/lib/types";
 
 const HOUR = 60 * 60 * 1000;
 
+/** A customer's recent price checks: viewable and deletable by the admin, reused only by the customer. */
 export function DraftsList({ drafts }: { drafts: Draft[] }) {
   const router = useRouter();
   const [items, setItems] = useState(drafts);
@@ -31,10 +31,7 @@ export function DraftsList({ drafts }: { drafts: Draft[] }) {
     return (
       <div className="rounded-xl border border-ink/10 bg-content1 p-10 text-center shadow-sm">
         <p className="display text-lg font-semibold">No drafts right now</p>
-        <p className="mt-1 text-sm text-steel">Every price check is kept here for 24 hours so you can reuse it.</p>
-        <Button as={NextLink} href="/admin/ship" color="primary" className="mt-5 font-semibold">
-          Get a price
-        </Button>
+        <p className="mt-1 text-sm text-steel">Price checks are kept here for 24 hours.</p>
       </div>
     );
   }
@@ -73,9 +70,6 @@ export function DraftsList({ drafts }: { drafts: Draft[] }) {
             <div className="mt-4 flex justify-end gap-2 border-t border-ink/10 pt-4">
               <Button size="sm" variant="light" color="danger" isLoading={deleting === d.id} onPress={() => remove(d.id)}>
                 Delete
-              </Button>
-              <Button as={NextLink} href={`/admin/ship?draft=${encodeURIComponent(d.id)}`} size="sm" color="primary" className="font-semibold">
-                Use for new quote
               </Button>
             </div>
           </li>

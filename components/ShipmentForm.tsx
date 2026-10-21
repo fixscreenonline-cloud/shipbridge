@@ -4,8 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import NextLink from "next/link";
 import { Alert, Button, Chip, Input, Skeleton, Tab, Tabs, addToast } from "@heroui/react";
 import { AddressFields, emptyAddress } from "./AddressFields";
-import { RecentPanel } from "./RecentPanel";
 import { AddressAssist } from "./AddressAssist";
+import { printLabel } from "./printLabel";
 import { ArrowRightIcon, BoxIcon, CheckIcon, ClockIcon, PrinterIcon, SwapIcon, TruckIcon } from "./icons";
 import { formatMoney } from "@/lib/pricing";
 import type { Address, DimensionUnit, PublicRate, ShipmentRequest, WeightUnit } from "@/lib/types";
@@ -127,30 +127,30 @@ type Props = {
   initialRequest?: ShipmentRequest | null;
   /** What the inputs came from, for the notice ("draft" or "booking"). */
   prefilledFrom?: string;
-  /** Inside /admin: link the finished label to the Shipments page. */
-  admin?: boolean;
   /** Hide the "New shipment" title (the page shows its own heading). */
   hideTitle?: boolean;
-  /** Show recent drafts and bookings (admin only; booking logins can't read them). */
-  showRecent?: boolean;
   /** Show "Scan / paste" on the address cards (needs ANTHROPIC_API_KEY on the server). */
   scanEnabled?: boolean;
+  /** The customer's business address (set by the admin), offered as "Use business address". */
+  businessSender?: Address | null;
+  /** Keeps "last sender" separate per account on a shared device. */
+  storageScope?: string;
 };
 
 // The sender is usually the same every time: remember it on this device (no server copy) and offer
 // it as a one-tap option; it's never filled in without the user choosing it.
 const SENDER_KEY = "shipbridge:last-sender";
-function loadSender(): Address | null {
+function loadSender(scope: string): Address | null {
   try {
-    const raw = localStorage.getItem(SENDER_KEY);
+    const raw = localStorage.getItem(SENDER_KEY + (scope ? `:${scope}` : ""));
     return raw ? toFormAddress(JSON.parse(raw)) : null;
   } catch {
     return null;
   }
 }
-function saveSender(a: Address) {
+function saveSender(a: Address, scope: string) {
   try {
-    localStorage.setItem(SENDER_KEY, JSON.stringify(a));
+    localStorage.setItem(SENDER_KEY + (scope ? `:${scope}` : ""), JSON.stringify(a));
   } catch {
     /* private mode or storage blocked: nothing to remember */
   }
@@ -159,10 +159,10 @@ function saveSender(a: Address) {
 export function ShipmentForm({
   initialRequest = null,
   prefilledFrom,
-  admin = false,
   hideTitle = false,
-  showRecent = true,
   scanEnabled = false,
+  businessSender = null,
+  storageScope = "",
 }: Props = {}) {
   const [from, setFrom] = useState<Address>(() => (initialRequest ? toFormAddress(initialRequest.from) : emptyAddress()));
   const [to, setTo] = useState<Address>(() => (initialRequest ? toFormAddress(initialRequest.to) : emptyAddress()));
@@ -170,7 +170,7 @@ export function ShipmentForm({
   const [shipDate, setShipDate] = useState(() => futureDate(initialRequest?.shipDate));
   // The remembered sender, offered as "Use last sender" (read after mount: localStorage is browser-only).
   const [lastSender, setLastSender] = useState<Address | null>(null);
-  useEffect(() => setLastSender(loadSender()), []);
+  useEffect(() => setLastSender(loadSender(storageScope)), [storageScope]);
 
   const [notice, setNotice] = useState<string | null>(
     initialRequest ? `Filled from a ${prefilledFrom ?? "saved shipment"}. Check the details, then choose Get rates.` : null,
@@ -186,7 +186,6 @@ export function ShipmentForm({
   const ratesRef = useRef<HTMLElement>(null);
   const formTopRef = useRef<HTMLDivElement>(null);
   // Bumped after rates or a purchase so the Recent panel reloads.
-  const [recentKey, setRecentKey] = useState(0);
 
   // Any edit invalidates the current rates.
   const touch = <T,>(setter: (v: T) => void) => (v: T) => {
@@ -231,8 +230,7 @@ export function ShipmentForm({
       if (!res.ok) throw new Error(json.error ?? "Could not get rates.");
       setRates(json.rates);
       if (json.rates.length) setSelected(json.rates[0].rateId);
-      setRecentKey((k) => k + 1);
-      saveSender(from); // a sender that got real rates is worth offering next time
+      saveSender(from, storageScope); // a sender that got real rates is worth offering next time
       setLastSender(from);
     } catch (err) {
       setError((err as Error).message);
@@ -258,7 +256,6 @@ export function ShipmentForm({
       }
       if (!res.ok) throw new Error(json.error ?? "Could not buy the label.");
       setPurchased(json.shipment);
-      setRecentKey((k) => k + 1);
       addToast({ title: "Label bought", description: `Shipment ${json.shipment.shipmentNo}`, color: "success" });
     } catch (err) {
       setError((err as Error).message);
@@ -276,62 +273,13 @@ export function ShipmentForm({
     setError(null);
   }
 
-  /** Refill the form from a draft or past booking; prices are fetched fresh with Get rates. */
-  function fillFromRequest(req: ShipmentRequest, what: string) {
-    setFrom(toFormAddress(req.from));
-    setTo(toFormAddress(req.to));
-    setPkg(toFormPkg(req.package));
-    setShipDate(futureDate(req.shipDate));
-    setNotice(null);
-    setRates(null);
-    setSelected(null);
-    setError(null);
-    formTopRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-    addToast({ title: `Filled from ${what}`, description: "Check the details, then choose Get rates.", color: "primary" });
-  }
-
   function swap() {
     const f = from;
     touch(setFrom)(to);
     setTo(f);
   }
 
-  // Print the label from this page (desktop browsers). The label is served from our own site so the
-  // browser allows printing it; iPhone/iPad can't print a PDF from a page, so open it there instead.
   const [printing, setPrinting] = useState(false);
-  function printLabel(id: string) {
-    const src = `/api/label/${encodeURIComponent(id)}`;
-    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-    if (isIOS) {
-      window.open(src, "_blank", "noopener");
-      return;
-    }
-    setPrinting(true);
-    document.getElementById("label-print-frame")?.remove();
-    const frame = document.createElement("iframe");
-    frame.id = "label-print-frame";
-    frame.title = "Label for printing";
-    frame.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden";
-    const fallback = () => {
-      setPrinting(false);
-      window.open(src, "_blank", "noopener");
-    };
-    frame.onload = () => {
-      setPrinting(false);
-      // Give the PDF viewer a moment to load before opening the print dialog.
-      setTimeout(() => {
-        try {
-          frame.contentWindow?.focus();
-          frame.contentWindow?.print();
-        } catch {
-          fallback();
-        }
-      }, 400);
-    };
-    frame.onerror = fallback;
-    frame.src = src;
-    document.body.appendChild(frame);
-  }
 
   function reset() {
     setTo(emptyAddress());
@@ -368,7 +316,10 @@ export function ShipmentForm({
                 className="font-semibold"
                 startContent={!printing && <PrinterIcon />}
                 isLoading={printing}
-                onPress={() => printLabel(purchased.id)}
+                onPress={() => {
+                  setPrinting(true);
+                  printLabel(purchased.id, () => setPrinting(false));
+                }}
               >
                 {printing ? "Preparing…" : "Print label"}
               </Button>
@@ -381,11 +332,6 @@ export function ShipmentForm({
             <Button variant="bordered" size="lg" onPress={reset}>
               Create another shipment
             </Button>
-            {admin && (
-              <Button as={NextLink} href="/admin/shipments" variant="light" size="lg">
-                View in Shipments
-              </Button>
-            )}
           </div>
         </div>
       </section>
@@ -422,8 +368,6 @@ export function ShipmentForm({
           <Alert color="primary" variant="faded" title={notice} isClosable onClose={() => setNotice(null)} />
         )}
 
-        {showRecent && <RecentPanel refreshKey={recentKey} onUse={fillFromRequest} defaultOpen={!admin} />}
-
         <div ref={formTopRef} className="@container scroll-mt-4">
           <div className="grid gap-6 @2xl:grid-cols-2">
             <Section
@@ -431,7 +375,18 @@ export function ShipmentForm({
               title="Ship from"
               action={
                 <div className="flex items-center gap-1">
-                  {lastSender && !from.street && !from.first_name && (
+                  {businessSender && !from.street && !from.first_name && (
+                    <Button
+                      size="sm"
+                      variant="light"
+                      onPress={() => touch(setFrom)(toFormAddress(businessSender))}
+                      isDisabled={loadingRates}
+                      title={`${businessSender.company_name || businessSender.first_name}, ${businessSender.city} ${businessSender.state}`}
+                    >
+                      Use business address
+                    </Button>
+                  )}
+                  {!businessSender && lastSender && !from.street && !from.first_name && (
                     <Button
                       size="sm"
                       variant="light"

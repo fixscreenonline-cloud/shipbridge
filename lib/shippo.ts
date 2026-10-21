@@ -83,9 +83,14 @@ function errorText(json: unknown): string | undefined {
   return parts.slice(0, 3).join("; ") || undefined;
 }
 
-async function call<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
-  const token = process.env.SHIPPO_API_TOKEN;
-  if (!token) throw new CarrierApiError("Shippo API key is missing. Set SHIPPO_API_TOKEN.", 500);
+/**
+ * Which Shippo key a call uses: the customer's own key (SHIPPO_API_TOKEN only for labels booked before
+ * customer accounts existed). `null` means "the customer hasn't added a key yet".
+ */
+export type ShippoKey = string | null;
+
+async function call<T>(token: ShippoKey, method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
+  if (!token) throw new CarrierApiError("No Shippo API key yet. Add one in Settings.", 400);
 
   const res = await fetch(`${API_BASE}${path}`, {
     method,
@@ -116,20 +121,20 @@ const messagesText = (m?: ShippoMessage[]) =>
 
 // ---------- Endpoints ----------
 /** Creates a shipment and returns it with its rates (synchronously). */
-export function createShipment(input: {
+export function createShipment(token: ShippoKey, input: {
   address_from: ShippoAddress;
   address_to: ShippoAddress;
   parcels: ShippoParcel[];
   shipment_date?: string;
 }) {
-  return call<ShippoShipment>("POST", "/shipments/", { ...input, async: false });
+  return call<ShippoShipment>(token, "POST", "/shipments/", { ...input, async: false });
 }
 
 /** Buys the label for a rate. Throws with Shippo's reason if the purchase didn't succeed. */
-export async function buyLabel(rateId: string): Promise<ShippoTransaction> {
-  const tx = await call<ShippoTransaction>("POST", "/transactions/", {
+export async function buyLabel(token: ShippoKey, rateId: string, labelFileType?: string): Promise<ShippoTransaction> {
+  const tx = await call<ShippoTransaction>(token, "POST", "/transactions/", {
     rate: rateId,
-    label_file_type: process.env.SHIPPO_LABEL_FILE_TYPE || "PDF_4x6",
+    label_file_type: labelFileType || process.env.SHIPPO_LABEL_FILE_TYPE || "PDF_4x6",
     async: false,
   });
   if (tx.status !== "SUCCESS") {
@@ -140,6 +145,15 @@ export async function buyLabel(rateId: string): Promise<ShippoTransaction> {
 }
 
 /** Fetches a transaction again; its label_url is a signed link that expires, so get a fresh one. */
-export function getTransaction(id: string) {
-  return call<ShippoTransaction>("GET", `/transactions/${encodeURIComponent(id)}`);
+export function getTransaction(token: ShippoKey, id: string) {
+  return call<ShippoTransaction>(token, "GET", `/transactions/${encodeURIComponent(id)}`);
+}
+
+/**
+ * Checks a Shippo key before saving it: a cheap read that only succeeds with a valid key.
+ * Returns whether it's a test or live key, or throws CarrierApiError with Shippo's reason.
+ */
+export async function checkShippoKey(token: string): Promise<"test" | "live"> {
+  await call<unknown>(token, "GET", "/carrier_accounts/?results=1");
+  return token.startsWith("shippo_test_") ? "test" : "live";
 }

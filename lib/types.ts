@@ -47,6 +47,8 @@ export type PublicRate = {
 export type Quote = PublicRate & {
   /** The draft (form inputs) this quote was fetched for. */
   draftId?: string;
+  /** Who fetched it: a customer user id, or "admin". Missing on older records (= admin). */
+  ownerId?: string;
   cost: number;
   recipient: string;
   marginPercent: number;
@@ -57,6 +59,10 @@ export type Quote = PublicRate & {
 
 export type ShipmentRecord = {
   id: string;
+  /** Who bought it: a customer user id, or "admin". Missing on older records (= admin). */
+  ownerId?: string;
+  /** Customer's display name at the time of booking (for admin lists). */
+  ownerName?: string;
   createdAt: string;
   rateId: string;
   shipmentNo: string;
@@ -131,6 +137,8 @@ export type ShipmentRequest = {
  */
 export type Draft = ShipmentRequest & {
   id: string;
+  /** Who made the price check: a customer user id, or "admin". Missing on older records (= admin). */
+  ownerId?: string;
   createdAt: string;
   updatedAt: string;
   rateCount: number;
@@ -139,3 +147,63 @@ export type Draft = ShipmentRequest & {
   carrierNotes?: { carrier: string; message: string }[];
   currency: string;
 };
+
+/** Owner id used for the operator's own bookings (and records from before customer accounts). */
+export const ADMIN_OWNER = "admin";
+export const ownerOf = (r: { ownerId?: string }) => r.ownerId ?? ADMIN_OWNER;
+
+/** What the admin sets for each customer. */
+export type CustomerSettings = {
+  /** Your fee on top of the customer's Shippo price: percent + flat amount per label. */
+  feePercent: number;
+  feeFlat: number;
+  /** Business "Ship from" address, offered on the booking form. */
+  defaultSender: Address | null;
+  /** Optional caps per calendar month (null = no limit). Spend = what the customer pays incl. your fee. */
+  monthlyLabelLimit: number | null;
+  monthlySpendLimit: number | null;
+  /** Carriers they may use, e.g. ["USPS"]; empty = all carriers on their Shippo account. */
+  allowedCarriers: string[];
+  /** Shippo label format, e.g. "PDF_4x6". */
+  labelFileType: string;
+  /** Photo/paste address scanning (needs ANTHROPIC_API_KEY on the server). */
+  scanEnabled: boolean;
+};
+
+/** A customer account (a business you give access to). */
+export type CustomerUser = {
+  id: string;
+  username: string;
+  usernameLower: string;
+  passwordHash: string;
+  name: string;
+  company: string;
+  email: string;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+  settings: CustomerSettings;
+  /** The customer's own Shippo key, stored encrypted; only the last 4 characters are ever shown. */
+  shippo: { tokenEnc: string | null; last4: string | null; mode: "test" | "live" | null; updatedAt: string | null };
+};
+
+/** A customer as shown in the admin UI (no password hash, no key). */
+export type CustomerView = Omit<CustomerUser, "passwordHash" | "shippo" | "usernameLower"> & {
+  shippo: { connected: boolean; last4: string | null; mode: "test" | "live" | null; updatedAt: string | null };
+};
+
+export const toCustomerView = (u: CustomerUser): CustomerView => {
+  const { passwordHash, shippo, usernameLower, ...rest } = u;
+  return { ...rest, shippo: { connected: !!shippo.tokenEnc, last4: shippo.last4, mode: shippo.mode, updatedAt: shippo.updatedAt } };
+};
+
+export const defaultCustomerSettings = (): CustomerSettings => ({
+  feePercent: 0,
+  feeFlat: 0,
+  defaultSender: null,
+  monthlyLabelLimit: null,
+  monthlySpendLimit: null,
+  allowedCarriers: [],
+  labelFileType: "PDF_4x6",
+  scanEnabled: true,
+});

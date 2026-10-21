@@ -7,7 +7,7 @@ import { CarrierBadge } from "../CarrierBadge";
 import { ArrowRightIcon, PlusIcon } from "../icons";
 import { PageHeader } from "./PageHeader";
 import { formatMoney, round2 } from "@/lib/pricing";
-import type { Draft, MarginSettings, ShipmentRecord } from "@/lib/types";
+import type { ShipmentRecord } from "@/lib/types";
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -49,6 +49,11 @@ function Card({ title, action, children }: { title: string; action?: React.React
   );
 }
 
+type CustomerInfo = { id: string; name: string; username: string; active: boolean };
+type ByCustomer = { key: string; name: string; sub: string; active: boolean; month: ReturnType<typeof sum>; all: ReturnType<typeof sum> };
+
+const ownerKey = (s: ShipmentRecord) => (s.ownerId && s.ownerId !== "admin" ? s.ownerId : "admin");
+
 const viewAll = (href: string, label = "View all") => (
   <NextLink href={href} className="flex items-center gap-1 text-sm font-medium text-steel hover:text-foreground">
     {label} <ArrowRightIcon className="size-3.5" />
@@ -57,13 +62,11 @@ const viewAll = (href: string, label = "View all") => (
 
 export function Overview({
   shipments,
-  drafts,
-  settings,
+  customers,
   noteCount,
 }: {
   shipments: ShipmentRecord[];
-  drafts: Draft[];
-  settings: MarginSettings;
+  customers: CustomerInfo[];
   noteCount: number;
 }) {
   // "Today" and relative times depend on the viewer's clock, so compute them after mounting.
@@ -80,17 +83,42 @@ export function Overview({
     };
   }, [shipments, now]);
 
+  // One row per customer (plus you), ranked by profit this month, then all time.
+  const byCustomer = useMemo(() => {
+    if (now === null) return null;
+    const monthStart = new Date(now);
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+    const groups = new Map<string, ShipmentRecord[]>();
+    for (const s of shipments) groups.set(ownerKey(s), [...(groups.get(ownerKey(s)) ?? []), s]);
+    const row = (key: string, name: string, sub: string, active: boolean): ByCustomer => {
+      const list = groups.get(key) ?? [];
+      return { key, name, sub, active, month: sum(list.filter((s) => Date.parse(s.createdAt) >= monthStart.getTime())), all: sum(list) };
+    };
+    const known = new Set(customers.map((c) => c.id));
+    const rows = [
+      row("admin", "You", "labels you booked before customer accounts", true),
+      ...customers.map((c) => row(c.id, c.name, `@${c.username}`, c.active)),
+      // Bookings by a customer account that no longer exists
+      ...[...groups.keys()]
+        .filter((k) => k !== "admin" && !known.has(k))
+        .map((k) => row(k, groups.get(k)![0].ownerName ?? "Former customer", "removed", false)),
+    ];
+    return rows.filter((r) => r.key !== "admin" || r.all.labels > 0).sort((a, b) => b.month.profit - a.month.profit || b.all.profit - a.all.profit);
+  }, [shipments, customers, now]);
+
   const money = (n: number | undefined) => (n === undefined ? "—" : formatMoney(round2(n)));
+  const activeCustomers = customers.filter((c) => c.active).length;
   const markup = stats && stats.all.cost > 0 ? `${round2((stats.all.profit / stats.all.cost) * 100)}%` : "—";
 
   return (
     <>
       <PageHeader
         title="Overview"
-        description="How ShipBridge is doing, and shortcuts to what you do most."
+        description="How your customers are doing and what you earn from each."
         actions={
-          <Button as={NextLink} href="/admin/ship" color="secondary" className="font-semibold" startContent={<PlusIcon />}>
-            New shipment
+          <Button as={NextLink} href="/admin/users" color="secondary" className="font-semibold" startContent={<PlusIcon />}>
+            Add customer
           </Button>
         }
       />
@@ -99,7 +127,7 @@ export function Overview({
         <Stat label="Profit today" value={money(stats?.today.profit)} sub={stats ? `${stats.today.labels} label${stats.today.labels === 1 ? "" : "s"}` : undefined} accent />
         <Stat label="Profit · 7 days" value={money(stats?.week.profit)} sub={stats ? `${stats.week.labels} labels` : undefined} />
         <Stat label="Customers paid · 7 days" value={money(stats?.week.charged)} sub={stats ? `Shippo cost ${money(stats.week.cost)}` : undefined} />
-        <Stat label="Avg. markup" value={markup} sub={`Margin set to ${settings.percent}%${settings.flatFee ? ` + ${formatMoney(settings.flatFee)}` : ""}`} />
+        <Stat label="Avg. markup" value={markup} sub={`${activeCustomers} active customer${activeCustomers === 1 ? "" : "s"}`} />
       </div>
 
       <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-ink px-5 py-4 text-white shadow-sm">
@@ -120,16 +148,59 @@ export function Overview({
         </div>
       </div>
 
-      <div className="mt-8 grid items-start gap-6 xl:grid-cols-[1.4fr_1fr]">
-        <Card title="Latest bookings" action={shipments.length > 0 && viewAll("/admin/shipments")}>
-          {shipments.length === 0 ? (
+      <div className="mt-8">
+        <Card title="Profit by customer" action={viewAll("/admin/users", "Manage users")}>
+          {!byCustomer ? (
+            <p className="px-3 py-6 text-center text-sm text-steel">Loading…</p>
+          ) : byCustomer.length === 0 ? (
             <p className="px-3 py-8 text-center text-sm text-steel">
-              No labels yet.{" "}
-              <NextLink href="/admin/ship" className="font-medium text-foreground underline">
-                Create your first shipment
+              No customers yet.{" "}
+              <NextLink href="/admin/users" className="font-medium text-foreground underline">
+                Add your first customer
               </NextLink>
               .
             </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[620px] text-sm">
+                <thead>
+                  <tr className="text-left text-xs uppercase tracking-wide text-steel">
+                    <th className="px-3 py-2 font-medium">Customer</th>
+                    <th className="px-3 py-2 text-right font-medium">Labels · this month</th>
+                    <th className="px-3 py-2 text-right font-medium">Profit · this month</th>
+                    <th className="px-3 py-2 text-right font-medium">Labels · all time</th>
+                    <th className="px-3 py-2 text-right font-medium">Profit · all time</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {byCustomer.map((c) => (
+                    <tr key={c.key} className="border-t border-ink/10 hover:bg-default-100">
+                      <td className="px-3 py-2.5">
+                        <NextLink href={`/admin/shipments?customer=${encodeURIComponent(c.key)}`} className="block">
+                          <span className="font-medium">{c.name}</span>
+                          <span className="ml-2 text-xs text-steel">{c.sub}</span>
+                          {!c.active && c.key !== "admin" && <span className="ml-2 rounded bg-default-100 px-1.5 py-0.5 text-xs text-steel">off</span>}
+                        </NextLink>
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums">{c.month.labels}</td>
+                      <td className={`px-3 py-2.5 text-right font-semibold tabular-nums ${c.month.profit < 0 ? "text-danger" : c.month.profit > 0 ? "text-success" : "text-steel"}`}>
+                        {money(c.month.profit)}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-steel">{c.all.labels}</td>
+                      <td className="px-3 py-2.5 text-right tabular-nums">{money(c.all.profit)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+      </div>
+
+      <div className="mt-6 grid items-start gap-6 xl:grid-cols-[1.4fr_1fr]">
+        <Card title="Latest bookings" action={shipments.length > 0 && viewAll("/admin/shipments")}>
+          {shipments.length === 0 ? (
+            <p className="px-3 py-8 text-center text-sm text-steel">No labels yet.</p>
           ) : (
             <ul>
               {shipments.slice(0, 6).map((s) => (
@@ -142,7 +213,7 @@ export function Overview({
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm font-medium">{s.serviceName}</span>
                       <span className="block truncate text-xs text-steel">
-                        {s.recipient}
+                        {ownerKey(s) === "admin" ? "You" : customers.find((c) => c.id === s.ownerId)?.name ?? s.ownerName ?? "Customer"} → {s.recipient}
                         {now !== null && ` · ${ago(s.createdAt, now)}`}
                       </span>
                     </span>
@@ -159,50 +230,17 @@ export function Overview({
           )}
         </Card>
 
-        <div className="space-y-6">
-          <Card title="Drafts · last 24 h" action={drafts.length > 0 && viewAll("/admin/drafts")}>
-            {drafts.length === 0 ? (
-              <p className="px-3 py-6 text-center text-sm text-steel">No price checks in the last 24 hours.</p>
-            ) : (
-              <ul>
-                {drafts.slice(0, 4).map((d) => (
-                  <li key={d.id} className="flex items-center gap-3 rounded-lg px-3 py-2.5 hover:bg-default-100">
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-sm font-medium">
-                        {d.from.city}, {d.from.state} → {d.to.city}, {d.to.state}
-                      </span>
-                      <span className="block truncate text-xs text-steel">
-                        {d.lowestPrice != null ? `from ${formatMoney(d.lowestPrice, d.currency)}` : "no rates"}
-                        {now !== null && ` · ${ago(d.updatedAt, now)}`}
-                      </span>
-                    </span>
-                    <Button as={NextLink} href={`/admin/ship?draft=${encodeURIComponent(d.id)}`} size="sm" variant="bordered" className="font-medium">
-                      Use
-                    </Button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </Card>
-
-          <div className="grid grid-cols-2 gap-3">
-            <NextLink
-              href="/admin/margin"
-              className="rounded-xl border border-ink/10 bg-content1 p-4 shadow-sm transition-colors hover:border-ink/30"
-            >
-              <p className="text-xs font-medium uppercase tracking-wide text-steel">Margin</p>
-              <p className="display mt-1 text-2xl font-bold">{settings.percent}%</p>
-              <p className="mt-1 text-xs text-steel">{settings.flatFee ? `+ ${formatMoney(settings.flatFee)} per label` : "No flat fee"}</p>
-            </NextLink>
-            <NextLink
-              href="/admin/carriers"
-              className="rounded-xl border border-ink/10 bg-content1 p-4 shadow-sm transition-colors hover:border-ink/30"
-            >
-              <p className="text-xs font-medium uppercase tracking-wide text-steel">Carrier notes</p>
-              <p className="display mt-1 text-2xl font-bold">{noteCount}</p>
-              <p className="mt-1 text-xs text-steel">{noteCount ? "From the last 24 h" : "All carriers quoted"}</p>
-            </NextLink>
-          </div>
+        <div className="grid grid-cols-2 gap-3">
+          <NextLink href="/admin/users" className="rounded-xl border border-ink/10 bg-content1 p-4 shadow-sm transition-colors hover:border-ink/30">
+            <p className="text-xs font-medium uppercase tracking-wide text-steel">Customers</p>
+            <p className="display mt-1 text-2xl font-bold">{activeCustomers}</p>
+            <p className="mt-1 text-xs text-steel">{customers.length - activeCustomers ? `${customers.length - activeCustomers} switched off` : "All active"}</p>
+          </NextLink>
+          <NextLink href="/admin/carriers" className="rounded-xl border border-ink/10 bg-content1 p-4 shadow-sm transition-colors hover:border-ink/30">
+            <p className="text-xs font-medium uppercase tracking-wide text-steel">Carrier notes</p>
+            <p className="display mt-1 text-2xl font-bold">{noteCount}</p>
+            <p className="mt-1 text-xs text-steel">{noteCount ? "From the last 24 h" : "All carriers quoted"}</p>
+          </NextLink>
         </div>
       </div>
     </>

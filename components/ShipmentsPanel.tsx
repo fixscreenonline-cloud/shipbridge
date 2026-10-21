@@ -11,6 +11,8 @@ import {
   DrawerFooter,
   DrawerHeader,
   Input,
+  Select,
+  SelectItem,
   Tab,
   Table,
   TableBody,
@@ -23,7 +25,6 @@ import {
 } from "@heroui/react";
 import { SearchIcon } from "./icons";
 import { formatMoney, round2 } from "@/lib/pricing";
-import { bookingRequest } from "@/lib/requests";
 import type { ShipmentParty, ShipmentRecord } from "@/lib/types";
 
 type Period = "all" | "today" | "7d" | "30d";
@@ -42,7 +43,7 @@ const dateTime = (iso: string) =>
 
 function toCsv(rows: ShipmentRecord[]) {
   const head = [
-    "Date", "Shipment", "Tracking", "Carrier", "Service", "Recipient",
+    "Date", "Customer", "Shipment", "Tracking", "Carrier", "Service", "Recipient",
     "From", "To", "Parcel", "Shippo cost", "Customer paid", "Profit", "Margin %", "Label URL",
   ];
   const addr = (p: ShipmentParty | null | undefined) =>
@@ -59,7 +60,7 @@ function toCsv(rows: ShipmentRecord[]) {
       ? `${d.parcel.length}x${d.parcel.width}x${d.parcel.height} ${d.parcel.distanceUnit ?? "in"} / ${d.parcel.weight} ${d.parcel.massUnit ?? "lb"}`
       : "";
     return [
-      s.createdAt, s.shipmentNo, s.trackingNo, d?.carrier ?? s.carrierCode, s.serviceName, s.recipient,
+      s.createdAt, s.ownerName ?? "You", s.shipmentNo, s.trackingNo, d?.carrier ?? s.carrierCode, s.serviceName, s.recipient,
       addr(d?.from), addr(d?.to), parcel, s.cost, s.charged, s.profit, s.marginPercent, s.labelUrls[0],
     ].map(cell).join(",");
   });
@@ -195,21 +196,78 @@ function Details({ s }: { s: ShipmentRecord }) {
   );
 }
 
-export function ShipmentsPanel({ shipments, initialOpenId = null }: { shipments: ShipmentRecord[]; initialOpenId?: string | null }) {
+type CustomerTotals = { key: string; name: string; labels: number; charged: number; profit: number; last: string };
+
+const ownerKey = (s: ShipmentRecord) => (s.ownerId && s.ownerId !== "admin" ? s.ownerId : "admin");
+
+export function ShipmentsPanel({
+  shipments,
+  initialOpenId = null,
+  initialQuery = "",
+  initialCustomer = "all",
+  ownerNames = {},
+}: {
+  shipments: ShipmentRecord[];
+  initialOpenId?: string | null;
+  initialQuery?: string;
+  /** "all", "admin" (your own bookings) or a customer id. */
+  initialCustomer?: string;
+  /** ownerId -> "Business (@username)", for searching and showing customers. */
+  ownerNames?: Record<string, string>;
+}) {
   const [period, setPeriod] = useState<Period>("all");
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(initialQuery);
+  const [customer, setCustomerState] = useState(initialCustomer);
+  const customerOf = (s: ShipmentRecord) => (ownerKey(s) !== "admin" ? ownerNames[s.ownerId!] ?? s.ownerName ?? "Customer" : "You");
   const [openId, setOpenId] = useState<string | null>(initialOpenId);
 
-  const rows = useMemo(() => {
+  // Keep ?customer= in the address bar so the filtered view can be bookmarked or shared.
+  function setCustomer(key: string) {
+    setCustomerState(key);
+    const url = new URL(window.location.href);
+    if (key === "all") url.searchParams.delete("customer");
+    else url.searchParams.set("customer", key);
+    window.history.replaceState(null, "", url);
+  }
+
+  // Everyone who can be filtered on: you, every customer account, and owners of older records.
+  const customerOptions = useMemo(() => {
+    const names = new Map<string, string>(Object.entries(ownerNames));
+    for (const s of shipments) if (ownerKey(s) !== "admin" && !names.has(ownerKey(s))) names.set(ownerKey(s), s.ownerName ?? "Former customer");
+    return [
+      { key: "all", label: "All customers" },
+      ...(shipments.some((s) => ownerKey(s) === "admin") ? [{ key: "admin", label: "You (before customer accounts)" }] : []),
+      ...[...names].sort((a, b) => a[1].localeCompare(b[1])).map(([key, label]) => ({ key, label })),
+    ];
+  }, [shipments, ownerNames]);
+
+  // Period + search, before the customer filter (feeds the per-customer summary).
+  const matching = useMemo(() => {
     const q = query.trim().toLowerCase();
     return shipments.filter((s) => {
       if (!inPeriod(s.createdAt, period)) return false;
       if (!q) return true;
       const d = s.details;
-      return [s.recipient, s.trackingNo, s.shipmentNo, s.serviceName, s.carrierCode, d?.from?.name, d?.to?.name, d?.to?.city, d?.to?.zip]
+      return [customerOf(s), s.recipient, s.trackingNo, s.shipmentNo, s.serviceName, s.carrierCode, d?.from?.name, d?.to?.name, d?.to?.city, d?.to?.zip]
         .some((v) => v?.toLowerCase().includes(q));
     });
-  }, [shipments, period, query]);
+  }, [shipments, period, query, ownerNames]);
+
+  const rows = useMemo(() => (customer === "all" ? matching : matching.filter((s) => ownerKey(s) === customer)), [matching, customer]);
+
+  const byCustomer = useMemo(() => {
+    const map = new Map<string, CustomerTotals>();
+    for (const s of matching) {
+      const key = ownerKey(s);
+      const t = map.get(key) ?? { key, name: customerOf(s), labels: 0, charged: 0, profit: 0, last: s.createdAt };
+      t.labels++;
+      t.charged += s.charged;
+      t.profit += s.profit;
+      if (s.createdAt > t.last) t.last = s.createdAt;
+      map.set(key, t);
+    }
+    return [...map.values()].sort((a, b) => b.profit - a.profit);
+  }, [matching, ownerNames]);
 
   const totals = useMemo(
     () => rows.reduce((t, s) => ({ cost: t.cost + s.cost, charged: t.charged + s.charged, profit: t.profit + s.profit }), { cost: 0, charged: 0, profit: 0 }),
@@ -221,7 +279,9 @@ export function ShipmentsPanel({ shipments, initialOpenId = null }: { shipments:
     const blob = new Blob([toCsv(rows)], { type: "text/csv;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `shipbridge-shipments-${new Date().toISOString().slice(0, 10)}.csv`;
+    const label = customerOptions.find((o) => o.key === customer)?.label ?? customer;
+    const who = customer === "all" ? "" : `-${label.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase()}`;
+    a.download = `shipbridge-shipments${who}-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(a.href);
   }
@@ -240,13 +300,66 @@ export function ShipmentsPanel({ shipments, initialOpenId = null }: { shipments:
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
         <Stat label="Labels" value={String(rows.length)} />
-        <Stat label="Customers paid" value={formatMoney(totals.charged)} />
+        <Stat label={customer === "all" ? "Customers paid" : "Paid"} value={formatMoney(totals.charged)} />
         <Stat label="Shippo cost" value={formatMoney(totals.cost)} />
         <Stat label="Profit" value={formatMoney(round2(totals.profit))} tone={totals.profit < 0 ? "danger" : "success"} />
         <Stat label="Avg. markup" value={pct(totals.profit, totals.cost)} />
       </div>
 
+      {customer === "all" && byCustomer.length > 1 && (
+        <div className="overflow-x-auto rounded-xl border border-ink/10 bg-content1 shadow-sm">
+          <p className="border-b border-ink/10 px-4 py-3 text-sm font-semibold">By customer</p>
+          <Table
+            aria-label="Totals by customer. Choose one to see only their shipments."
+            removeWrapper
+            className="min-w-[560px]"
+            onRowAction={(key) => setCustomer(String(key))}
+          >
+            <TableHeader>
+              <TableColumn>Customer</TableColumn>
+              <TableColumn align="end">Labels</TableColumn>
+              <TableColumn align="end">Paid</TableColumn>
+              <TableColumn align="end">Your profit</TableColumn>
+              <TableColumn>Last booking</TableColumn>
+            </TableHeader>
+            <TableBody>
+              {byCustomer.map((c) => (
+                <TableRow key={c.key} className="cursor-pointer hover:bg-default-100">
+                  <TableCell className="font-medium">{c.name}</TableCell>
+                  <TableCell className="tabular-nums">{c.labels}</TableCell>
+                  <TableCell className="tabular-nums">{formatMoney(round2(c.charged))}</TableCell>
+                  <TableCell className={`tabular-nums font-medium ${c.profit < 0 ? "text-danger" : "text-success"}`}>
+                    {formatMoney(round2(c.profit))}
+                  </TableCell>
+                  <TableCell className="whitespace-nowrap text-steel">{new Date(c.last).toLocaleDateString()}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center gap-3">
+        <Select
+          aria-label="Customer"
+          size="sm"
+          variant="bordered"
+          className="max-w-xs"
+          selectedKeys={[customer]}
+          disallowEmptySelection
+          onSelectionChange={(keys) => {
+            const k = Array.from(keys)[0];
+            if (k) setCustomer(String(k));
+          }}
+          items={customerOptions}
+        >
+          {(o) => <SelectItem key={o.key}>{o.label}</SelectItem>}
+        </Select>
+        {customer !== "all" && customer !== "admin" && ownerNames[customer] && (
+          <Button as={NextLink} href={`/admin/users/${encodeURIComponent(customer)}`} size="sm" variant="light">
+            Customer settings
+          </Button>
+        )}
         <Input
           aria-label="Search shipments"
           size="sm"
@@ -268,12 +381,13 @@ export function ShipmentsPanel({ shipments, initialOpenId = null }: { shipments:
         <Table
           aria-label="Shipments. Choose a row to see its details."
           removeWrapper
-          className="min-w-[760px]"
+          className="min-w-[880px]"
           selectionMode="none"
           onRowAction={(key) => setOpenId(String(key))}
         >
           <TableHeader>
             <TableColumn>Date</TableColumn>
+            <TableColumn>Customer</TableColumn>
             <TableColumn>Recipient</TableColumn>
             <TableColumn>Service</TableColumn>
             <TableColumn>Tracking</TableColumn>
@@ -283,11 +397,18 @@ export function ShipmentsPanel({ shipments, initialOpenId = null }: { shipments:
             <TableColumn> </TableColumn>
           </TableHeader>
           <TableBody
-            emptyContent={shipments.length ? "No shipments match." : "No labels yet. Bought labels will appear here with their profit."}
+            emptyContent={
+              !shipments.length
+                ? "No labels yet. Bought labels will appear here with their profit."
+                : customer !== "all" && !matching.some((s) => ownerKey(s) === customer)
+                  ? "No labels for this customer in this period."
+                  : "No shipments match."
+            }
           >
             {rows.map((s) => (
               <TableRow key={s.id} className="cursor-pointer hover:bg-default-100">
                 <TableCell className="whitespace-nowrap">{new Date(s.createdAt).toLocaleDateString()}</TableCell>
+                <TableCell className="max-w-[12rem] truncate">{customerOf(s)}</TableCell>
                 <TableCell>{s.recipient}</TableCell>
                 <TableCell>{s.serviceName}</TableCell>
                 <TableCell className="font-mono text-xs">{s.trackingNo ?? s.shipmentNo}</TableCell>
@@ -331,11 +452,6 @@ export function ShipmentsPanel({ shipments, initialOpenId = null }: { shipments:
                       className="font-semibold"
                     >
                       Open label
-                    </Button>
-                  )}
-                  {bookingRequest(open) && (
-                    <Button as={NextLink} href={`/admin/ship?booking=${encodeURIComponent(open.id)}`} variant="bordered">
-                      Ship again
                     </Button>
                   )}
                   <Button variant="light" onPress={close}>

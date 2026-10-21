@@ -3,14 +3,12 @@
 import { useEffect, useState } from "react";
 import NextLink from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { AlertIcon, BoxIcon, DraftIcon, GridIcon, ListIcon, LogoutIcon, PercentIcon, PlusIcon, ShieldIcon } from "../icons";
+import { AlertIcon, GridIcon, ListIcon, LogoutIcon, ShieldIcon, UsersIcon } from "../icons";
 
 const NAV = [
   { href: "/admin", label: "Overview", icon: GridIcon },
-  { href: "/admin/ship", label: "New shipment", icon: PlusIcon },
+  { href: "/admin/users", label: "Users", icon: UsersIcon },
   { href: "/admin/shipments", label: "Shipments", icon: ListIcon },
-  { href: "/admin/drafts", label: "Drafts", icon: DraftIcon },
-  { href: "/admin/margin", label: "Margin", icon: PercentIcon },
   { href: "/admin/carriers", label: "Carrier notes", icon: AlertIcon },
   { href: "/admin/security", label: "Security", icon: ShieldIcon },
 ];
@@ -98,10 +96,6 @@ export function AdminShell({ sessionEndsAt, children }: { sessionEndsAt: number 
               <LogoutIcon /> Sign out
             </button>
           </div>
-
-          <NextLink href="/" className="flex items-center gap-2 px-3 text-xs text-steel hover:text-foreground">
-            <BoxIcon className="size-3.5" /> Open the public quote page
-          </NextLink>
         </div>
       </aside>
 

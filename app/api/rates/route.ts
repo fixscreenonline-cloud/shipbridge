@@ -2,11 +2,12 @@ import { NextResponse } from "next/server";
 import { createHash } from "crypto";
 import { RateRequestSchema } from "@/lib/validation";
 import { createShipment, type ShippoAddress } from "@/lib/shippo";
-import { getSettings, saveDraftWithQuotes } from "@/lib/db";
+import { customerShippoKey } from "@/lib/customers";
+import { saveDraftWithQuotes } from "@/lib/db";
 import { applyMargin } from "@/lib/pricing";
 import { errorResponse } from "@/lib/http";
 import { BodyError, readJson } from "@/lib/request";
-import { requireUser } from "@/lib/session";
+import { requireCustomer } from "@/lib/session";
 import type { Address, Draft, PublicRate, Quote, ShipmentRequest } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -27,13 +28,14 @@ function toShippoAddress(a: Address): ShippoAddress {
 }
 
 /** Same addresses + parcel => same id, so re-quoting updates one draft instead of adding another. */
-function draftId(req: ShipmentRequest) {
+function draftId(req: ShipmentRequest, ownerId: string) {
   const norm = (a: Address) =>
     [a.first_name, a.last_name, a.company_name, a.phone, a.email, a.street, a.street2, a.city, a.state, a.zip_code, a.country]
       .map((v) => (v ?? "").trim().toLowerCase().replace(/\s+/g, " "))
       .join("|");
   const p = req.package;
-  const key = [norm(req.from), norm(req.to), p.length, p.width, p.height, p.dimension_unit, p.weight, p.weight_unit].join("#");
+  // The owner is part of the key: two customers quoting the same addresses get separate drafts.
+  const key = [ownerId, norm(req.from), norm(req.to), p.length, p.width, p.height, p.dimension_unit, p.weight, p.weight_unit].join("#");
   return "d_" + createHash("sha256").update(key).digest("hex").slice(0, 24);
 }
 
@@ -76,9 +78,10 @@ function serviceLabel(provider: string, name: string | undefined) {
 }
 
 export async function POST(req: Request) {
-  // The site is private: only signed-in users (booking login or admin) can get rates.
-  const auth = await requireUser(req);
+  // Only signed-in customers get rates (the admin doesn't book).
+  const auth = await requireCustomer(req);
   if ("response" in auth) return auth.response;
+  const { actor } = auth;
   let raw: unknown;
   try {
     raw = await readJson(req, 16 * 1024);
@@ -96,8 +99,14 @@ export async function POST(req: Request) {
   const { from, to, package: pkg, shipDate } = parsed.data;
 
   try {
+    // Customers rate on their own Shippo account.
+    const shippoKey = customerShippoKey(actor.user);
+    if (!shippoKey) {
+      return NextResponse.json({ error: "Add your Shippo API key in Settings to get rates.", code: "no_shippo_key" }, { status: 400 });
+    }
+
     // Shippo accepts inches/cm and pounds/ounces directly.
-    const shipment = await createShipment({
+    const shipment = await createShipment(shippoKey, {
       address_from: toShippoAddress(from),
       address_to: toShippoAddress(to),
       parcels: [
@@ -113,16 +122,22 @@ export async function POST(req: Request) {
       ...(shipDate ? { shipment_date: `${shipDate}T12:00:00Z` } : {}),
     });
 
-    const settings = await getSettings();
+    // Pricing: the customer pays their Shippo price plus the fee you set for them.
+    const pricing = { percent: actor.user.settings.feePercent, flatFee: actor.user.settings.feeFlat };
+    // Carrier names are compared without spaces/case ("DHL Express" = "DHLExpress").
+    const carrierKey = (c: string) => c.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    const allowed = actor.user.settings.allowedCarriers.map(carrierKey);
     const createdAt = new Date().toISOString();
     const request: ShipmentRequest = { from, to, package: pkg, ...(shipDate ? { shipDate } : {}) };
-    const id = draftId(request);
+    const id = draftId(request, actor.ownerId);
 
     const quotes: Quote[] = (shipment.rates ?? [])
       .filter((r) => r.object_id && Number(r.amount) > 0)
+      .filter((r) => allowed.length === 0 || allowed.includes(carrierKey(r.provider)))
       .map((r) => ({
         rateId: r.object_id,
         draftId: id,
+        ownerId: actor.ownerId,
         carrierCode: r.provider,
         serviceName: serviceLabel(r.provider, r.servicelevel?.name),
         serviceLevel: r.servicelevel?.token ?? "",
@@ -130,9 +145,9 @@ export async function POST(req: Request) {
         currency: r.currency || "USD",
         cost: Number(r.amount),
         recipient: `${to.first_name} ${to.last_name}, ${to.city} ${to.state}`,
-        price: applyMargin(Number(r.amount), settings),
-        marginPercent: settings.percent,
-        flatFee: settings.flatFee,
+        price: applyMargin(Number(r.amount), pricing),
+        marginPercent: pricing.percent,
+        flatFee: pricing.flatFee,
         createdAt,
         usedAt: null,
       }));
@@ -140,6 +155,7 @@ export async function POST(req: Request) {
     const draft: Draft = {
       ...request,
       id,
+      ownerId: actor.ownerId,
       createdAt,
       updatedAt: createdAt,
       rateCount: quotes.length,

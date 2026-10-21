@@ -2,13 +2,13 @@ import { PageHeader } from "@/components/admin/PageHeader";
 import { SecurityCenter } from "@/components/admin/SecurityCenter";
 import { getSecurity, listLockedLogins, listSessions } from "@/lib/db";
 import { requireAdminPage, roleOf } from "@/lib/session";
-import { adminUsername, bookingLogin } from "@/lib/login-flow";
+import { adminUsername } from "@/lib/login-flow";
 
 export const dynamic = "force-dynamic";
 
 export default async function AdminSecurityPage() {
   const me = await requireAdminPage("/admin/security");
-  const [security, sessions, locked, booking] = await Promise.all([getSecurity(), listSessions(), listLockedLogins(), bookingLogin()]);
+  const [security, sessions, locked] = await Promise.all([getSecurity(), listSessions(), listLockedLogins()]);
 
   const password = process.env.ADMIN_PASSWORD ?? "";
   const kinds = [/[a-z]/, /[A-Z]/, /\d/, /[^A-Za-z0-9]/].filter((r) => r.test(password)).length;
@@ -51,9 +51,8 @@ export default async function AdminSecurityPage() {
           ...s,
           current: s.id === me.id,
           role: roleOf(s),
-          username: s.username ?? (roleOf(s) === "admin" ? adminUsername() : "booking"),
+          username: s.username ?? (roleOf(s) === "admin" ? adminUsername() : "customer"),
         }))}
-        booking={{ username: booking?.username ?? null, source: booking?.source ?? null, updatedAt: security.bookingUpdatedAt }}
         adminUsername={adminUsername()}
         lockouts={locked.map((l) => ({ kind: l.key.startsWith("device:") ? "device" : "network", lockedUntil: l.lockedUntil, level: l.level }))}
         checks={checks}
